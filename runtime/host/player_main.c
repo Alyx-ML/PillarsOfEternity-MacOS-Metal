@@ -283,6 +283,7 @@ int main(int argc, char **argv)
        the program, and its message functions run the Cocoa event loop. */
     rt_cocoa_init(headless);
     rt_user32_init();
+    if (!headless) rt_gamepad_init();
     if (getenv("RT_INPUT") != NULL && getenv("RT_INPUT")[0] != 0) rt_user32_input_script(getenv("RT_INPUT"));
 
     /* The entry point of the program (the C runtime startup). It ends the

@@ -232,6 +232,9 @@ enum {
     RT_GFX_ANISOTROPIC,
     RT_GFX_SHADOWS,
     RT_GFX_FLOAT_TARGETS,
+    RT_GFX_MSAA,          /* 4x multisampled storage of the back buffer */
+    RT_GFX_SOFT_SHADOWS,  /* filtered lookups in the shadow projection shader */
+    RT_GFX_SHARP_BACKGROUNDS, /* edge-adaptive magnification of the background tiles */
     RT_GFX_COUNT
 };
 /* Read the settings file at path (host path). Call it before the program

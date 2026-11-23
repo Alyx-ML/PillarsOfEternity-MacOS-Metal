@@ -400,6 +400,7 @@ typedef struct disp_info {
     uint32_t id;
     CGFloat inset_l, inset_t, inset_r, inset_b; /* menu bar and Dock */
     uint32_t refresh;
+    double min_interval; /* NSScreen.minimumRefreshInterval (seconds) */
     char name[128];
 } disp_info;
 
@@ -426,6 +427,7 @@ static void refresh_display_cache(void)
             d[n].inset_t = NSMaxY(f) - NSMaxY(v);
             d[n].inset_b = v.origin.y - f.origin.y;
             d[n].refresh = s.maximumFramesPerSecond > 0 ? (uint32_t)s.maximumFramesPerSecond : 0;
+            d[n].min_interval = s.minimumRefreshInterval > 0.0 ? s.minimumRefreshInterval : 0.0;
             name = s.localizedName.UTF8String;
             snprintf(d[n].name, sizeof d[n].name, "%s", name != NULL ? name : "");
             n++;
@@ -435,6 +437,19 @@ static void refresh_display_cache(void)
     memcpy(g_disp, d, sizeof d);
     g_ndisp = n;
     gunlock();
+}
+
+double rt_cocoa_refresh_interval_at(int32_t x, int32_t y)
+{
+    CGDirectDisplayID id;
+    uint32_t count = 0;
+    double r = 0.0;
+    if (CGGetDisplaysWithPoint(CGPointMake(x, y), 1, &id, &count) != kCGErrorSuccess || count == 0) return 0.0;
+    glock();
+    for (int i = 0; i < g_ndisp; i++)
+        if (g_disp[i].id == id) r = g_disp[i].min_interval;
+    gunlock();
+    return r;
 }
 
 int rt_cocoa_displays(rt_display out[RT_MAX_DISPLAYS])

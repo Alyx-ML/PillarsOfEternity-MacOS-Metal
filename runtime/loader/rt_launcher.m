@@ -18,9 +18,19 @@
  * "<key> <value>" line for each setting, and comment lines that start with
  * '#'. A file that does not exist gives the initial values. A file with an
  * error is not changed until the player selects Play; the window tells the
- * player about the error. The labels and hints are the labels and tooltips
- * of the same settings on the Graphics tab of the game
- * (tools/port_graphics/PortGraphics.cs).
+ * player about the error. The labels and hints of settings 0 to 5 are the
+ * labels and tooltips of the same settings on the Graphics tab of the game
+ * (tools/port_graphics/PortGraphics.cs). Settings 6 to 8 are rows of this
+ * window only (rt_portgfx_defs.h).
+ *
+ * Update check: when the window opens, the launcher sends one request to
+ * the GitHub API for the latest release of the port (UPDATE_API). The
+ * request holds no data of the player. If the version of the release
+ * (tag_name, for example "v0.3") is newer than CFBundleShortVersionString of
+ * the application, the notes show the new version and a Download button
+ * that opens the release page in the browser. If the check fails, the notes
+ * show the cause; the launcher continues to operate. The window does not
+ * wait for the check, and Play and Quit cancel a check that did not end.
  */
 #import <Cocoa/Cocoa.h>
 
@@ -35,6 +45,9 @@
 #define LAUNCHER_PATH_LEN 1024
 #define MAX_VALUES 9
 #define BANNER_FILE "PillarsOfEternity_data/ScreenSelector.bmp"
+#define UPDATE_API "https://api.github.com/repos/Alyx-ML/PillarsOfEternity-MacOS-Metal/releases/latest"
+#define UPDATE_PAGE_PREFIX "https://github.com/Alyx-ML/PillarsOfEternity-MacOS-Metal/releases/"
+#define UPDATE_TIMEOUT_S 15.0
 
 /* The text of a setting in the window. */
 typedef struct setting_text {
@@ -64,6 +77,14 @@ static const setting_text graphics_rows[] = {
       "Draws the dynamic shadows of characters at 4 times the resolution in each direction.", { "Off", "On" } },
     { 5, "32-bit Render Targets",
       "Keeps the intermediate images of the game in 32-bit float, for more precise blending.", { "Off", "On" } },
+    { 6, "4x Multisample Anti-aliasing",
+      "Smooths the edges of characters, creatures and spell effects with 4x multisampling.", { "Off", "On" } },
+    { 7, "Soft Shadows",
+      "Filters the dynamic shadows with 16 samples, so that the shadow edges are soft and do not show steps.",
+      { "Off", "On" } },
+    { 8, "Sharper Backgrounds",
+      "Enlarges the painted backgrounds with the AMD FidelityFX EASU filter, which keeps the edges sharp.",
+      { "Off", "On" } },
 };
 
 #define NGRAPHICS (sizeof graphics_rows / sizeof graphics_rows[0])
@@ -230,6 +251,12 @@ static NSString *write_settings(const char *path, const int values[RT_GFX_DEF_CO
 @property(nonatomic) BOOL playChosen;
 @property(nonatomic) NSTextField *titleText; /* shown until the art of a game folder is loaded */
 @property(nonatomic) NSImageView *logo;
+@property(nonatomic) NSStackView *updateRow; /* hidden until the update check ends */
+@property(nonatomic) NSImageView *updateIcon;
+@property(nonatomic) NSTextField *updateText;
+@property(nonatomic) NSButton *updateButton;
+@property(nonatomic) NSURL *updateURL;
+@property(nonatomic) NSURLSessionDataTask *updateTask;
 @end
 
 @implementation RTLauncher
@@ -521,7 +548,7 @@ static NSView *panel(NSStackView *content, CGFloat width)
     restore = [NSButton buttonWithTitle:@"Restore Defaults" target:self action:@selector(restore:)];
     restore.controlSize = NSControlSizeLarge;
     versionNote = text_label(@"The game uses these settings when it starts. The Graphics tab of the game's options "
-                             @"has the same settings.",
+                             @"has the first six settings.",
                              [NSFont systemFontOfSize:11], C_HINT);
     self.banner = text_label(@"", [NSFont systemFontOfSize:12 weight:NSFontWeightMedium], C_WARN);
     self.banner.lineBreakMode = NSLineBreakByWordWrapping;
@@ -529,10 +556,25 @@ static NSView *panel(NSStackView *content, CGFloat width)
     self.banner.hidden = YES;
     versionNote.lineBreakMode = NSLineBreakByWordWrapping;
     versionNote.preferredMaxLayoutWidth = 330;
-    notes = [NSStackView stackViewWithViews:@[ self.banner, versionNote ]];
+    self.updateIcon = [NSImageView new];
+    [self.updateIcon.widthAnchor constraintEqualToConstant:16].active = YES;
+    [self.updateIcon.heightAnchor constraintEqualToConstant:16].active = YES;
+    self.updateText = text_label(@"", [NSFont systemFontOfSize:12 weight:NSFontWeightMedium], C_TEXT);
+    self.updateText.lineBreakMode = NSLineBreakByWordWrapping;
+    self.updateText.preferredMaxLayoutWidth = 220;
+    self.updateButton = [NSButton buttonWithTitle:@"Download" target:self action:@selector(download:)];
+    self.updateButton.controlSize = NSControlSizeSmall;
+    self.updateButton.font = [NSFont systemFontOfSize:11 weight:NSFontWeightMedium];
+    self.updateButton.toolTip = @"Open the release page in the browser";
+    self.updateRow = [NSStackView stackViewWithViews:@[ self.updateIcon, self.updateText, self.updateButton ]];
+    self.updateRow.alignment = NSLayoutAttributeCenterY;
+    self.updateRow.spacing = 8;
+    self.updateRow.hidden = YES;
+    notes = [NSStackView stackViewWithViews:@[ self.updateRow, self.banner, versionNote ]];
     notes.orientation = NSUserInterfaceLayoutOrientationVertical;
     notes.alignment = NSLayoutAttributeLeading;
     notes.spacing = 4;
+    [notes setCustomSpacing:10 afterView:self.updateRow];
     buttons = [NSStackView stackViewWithViews:@[ restore, self.play ]];
     buttons.distribution = NSStackViewDistributionEqualSpacing;
     actions = [NSStackView stackViewWithViews:@[ notes, buttons ]];
@@ -584,6 +626,157 @@ static NSView *panel(NSStackView *content, CGFloat width)
     ]];
     [self.window setContentSize:content.fittingSize];
     self.window.initialFirstResponder = self.play;
+}
+
+/* The numbers of a version ("0.2", "v1.10.3"); nil if the text is not a
+   version. */
+static NSArray<NSNumber *> *version_parts(NSString *text)
+{
+    NSMutableArray<NSNumber *> *parts = [NSMutableArray new];
+    NSString *t = text;
+    if ([t hasPrefix:@"v"] || [t hasPrefix:@"V"]) t = [t substringFromIndex:1];
+    if (t.length == 0 || t.length > 32) return nil;
+    for (NSString *c in [t componentsSeparatedByString:@"."])
+    {
+        NSInteger v;
+        NSScanner *sc = [NSScanner scannerWithString:c];
+        if (c.length == 0 || c.length > 6 || ![sc scanInteger:&v] || !sc.atEnd || v < 0) return nil;
+        [parts addObject:@(v)];
+    }
+    return parts;
+}
+
+/* -1, 0 or 1 when a is older than, the same as or newer than b. A missing
+   number is 0 ("0.2" is "0.2.0"). */
+static int version_compare(NSArray<NSNumber *> *a, NSArray<NSNumber *> *b)
+{
+    NSUInteger i, n = MAX(a.count, b.count);
+    for (i = 0; i < n; i++)
+    {
+        NSInteger x = i < a.count ? a[i].integerValue : 0, y = i < b.count ? b[i].integerValue : 0;
+        if (x != y) return x < y ? -1 : 1;
+    }
+    return 0;
+}
+
+- (void)showUpdate:(NSString *)text symbol:(NSString *)symbol color:(unsigned)color url:(NSURL *)url
+{
+    NSImage *img = [NSImage imageWithSystemSymbolName:symbol accessibilityDescription:nil];
+    if (img == nil) launcher_fail(@"A symbol of macOS is missing.", @"The update symbol cannot be loaded.");
+    self.updateIcon.image = img;
+    self.updateIcon.contentTintColor = rgb(color);
+    self.updateText.stringValue = text;
+    self.updateText.textColor = rgb(url != nil ? C_TEXT : C_HINT);
+    self.updateURL = url;
+    self.updateButton.hidden = url == nil;
+    self.updateRow.hidden = NO;
+}
+
+- (void)updateFailed:(NSString *)cause
+{
+    [self showUpdate:[NSString stringWithFormat:@"The update check did not complete: %@", cause]
+              symbol:@"exclamationmark.circle"
+               color:C_HINT
+                 url:nil];
+}
+
+/* The answer of UPDATE_API, on the main queue. */
+- (void)updateAnswer:(NSData *)data response:(NSURLResponse *)response error:(NSError *)error
+{
+    NSString *current = [NSBundle.mainBundle objectForInfoDictionaryKey:@"CFBundleShortVersionString"];
+    NSArray<NSNumber *> *have, *latest;
+    NSHTTPURLResponse *http;
+    NSDictionary *release;
+    NSString *tag, *page;
+    NSURL *url;
+    id json;
+    self.updateTask = nil;
+    if (self.finished) return;
+    if (error != nil)
+    {
+        [self updateFailed:error.localizedDescription];
+        return;
+    }
+    if (![response isKindOfClass:NSHTTPURLResponse.class])
+    {
+        [self updateFailed:@"the answer is not an HTTP answer."];
+        return;
+    }
+    http = (NSHTTPURLResponse *)response;
+    if (http.statusCode != 200)
+    {
+        [self updateFailed:[NSString stringWithFormat:@"GitHub sent the status %ld.", (long)http.statusCode]];
+        return;
+    }
+    json = data != nil ? [NSJSONSerialization JSONObjectWithData:data options:0 error:NULL] : nil;
+    if (![json isKindOfClass:NSDictionary.class])
+    {
+        [self updateFailed:@"the answer of GitHub is not a JSON object."];
+        return;
+    }
+    release = json;
+    tag = release[@"tag_name"];
+    page = release[@"html_url"];
+    if (![tag isKindOfClass:NSString.class] || (latest = version_parts(tag)) == nil)
+    {
+        [self updateFailed:@"the latest release has no version number."];
+        return;
+    }
+    if (![current isKindOfClass:NSString.class] || (have = version_parts(current)) == nil)
+    {
+        [self updateFailed:@"the application has no version number."];
+        return;
+    }
+    if (version_compare(latest, have) <= 0)
+    {
+        [self showUpdate:[NSString stringWithFormat:@"Version %@ is the latest version.", current]
+                  symbol:@"checkmark.circle"
+                   color:C_HINT
+                     url:nil];
+        return;
+    }
+    /* Open only the release pages of the port. */
+    url = [page isKindOfClass:NSString.class] && [page hasPrefix:@UPDATE_PAGE_PREFIX] ? [NSURL URLWithString:page] : nil;
+    if (url == nil)
+    {
+        [self updateFailed:@"the latest release has no release page on GitHub."];
+        return;
+    }
+    [self showUpdate:[NSString stringWithFormat:@"Version %@ is available. This is version %@.",
+                                                [tag stringByTrimmingCharactersInSet:[NSCharacterSet characterSetWithCharactersInString:@"vV"]],
+                                                current]
+              symbol:@"arrow.down.circle.fill"
+               color:C_GOLD_TEXT
+                 url:url];
+}
+
+- (void)checkForUpdate
+{
+    NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:@UPDATE_API]
+                                                       cachePolicy:NSURLRequestReloadIgnoringLocalCacheData
+                                                   timeoutInterval:UPDATE_TIMEOUT_S];
+    NSURLSessionConfiguration *cfg = NSURLSessionConfiguration.ephemeralSessionConfiguration;
+    NSURLSession *session;
+    __weak RTLauncher *weakSelf = self;
+    [req setValue:@"application/vnd.github+json" forHTTPHeaderField:@"Accept"];
+    [req setValue:@"PillarsOfEternity-MacOS-Metal-launcher" forHTTPHeaderField:@"User-Agent"];
+    cfg.HTTPCookieStorage = nil;
+    cfg.URLCache = nil;
+    session = [NSURLSession sessionWithConfiguration:cfg delegate:nil delegateQueue:NSOperationQueue.mainQueue];
+    self.updateTask = [session dataTaskWithRequest:req
+                                 completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
+                                   [weakSelf updateAnswer:data response:response error:error];
+                                 }];
+    [session finishTasksAndInvalidate];
+    [self.updateTask resume];
+}
+
+- (IBAction)download:(id)sender
+{
+    (void)sender;
+    if (self.updateURL == nil) return;
+    if (![NSWorkspace.sharedWorkspace openURL:self.updateURL])
+        [self showProblem:[NSString stringWithFormat:@"The release page cannot be opened: %@", self.updateURL.absoluteString]];
 }
 
 - (void)showProblem:(NSString *)text
@@ -639,6 +832,8 @@ static NSView *panel(NSStackView *content, CGFloat width)
     if (self.finished) return;
     self.finished = YES;
     self.playChosen = play;
+    [self.updateTask cancel];
+    self.updateTask = nil;
     wake = [NSEvent otherEventWithType:NSEventTypeApplicationDefined
                               location:NSZeroPoint
                          modifierFlags:0
@@ -733,6 +928,7 @@ bool rt_launcher_run(const char *settings, const char *initial, rt_launcher_chec
     [l.window center];
     [NSApp activate];
     [l.window makeKeyAndOrderFront:nil];
+    [l checkForUpdate];
     /* An event loop in the default run loop mode, not runModalForWindow:.
        AppKit sends the action of a main-menu item (Quit, Command-Q) later
        from the run loop, and a modal loop (NSModalPanelRunLoopMode) does not

@@ -8,6 +8,10 @@
  *
  * The file has one "<key> <value>" line for each setting. A line that
  * starts with '#' is a comment.
+ *
+ * Settings 6 to 8 (msaa, soft_shadows, sharp_backgrounds) are rows of the
+ * launcher window only. The Graphics page of the game's options window has
+ * no space for more rows.
  */
 #ifndef RT_PORTGFX_DEFS_H
 #define RT_PORTGFX_DEFS_H
@@ -20,7 +24,7 @@ typedef struct rt_gfx_def {
     bool restart; /* takes effect at the next start of the game */
 } rt_gfx_def;
 
-#define RT_GFX_DEF_COUNT 6
+#define RT_GFX_DEF_COUNT 9
 
 static const rt_gfx_def rt_gfx_defs[RT_GFX_DEF_COUNT] = {
     { "upscaling", 0, 1, 1, false },
@@ -29,6 +33,9 @@ static const rt_gfx_def rt_gfx_defs[RT_GFX_DEF_COUNT] = {
     { "anisotropic", 0, 1, 1, false },
     { "supersampled_shadows", 0, 1, 1, true },
     { "float_render_targets", 0, 1, 1, true },
+    { "msaa", 0, 1, 1, true },
+    { "soft_shadows", 0, 1, 1, true },
+    { "sharp_backgrounds", 0, 1, 1, true },
 };
 
 /* The first line of the file. */

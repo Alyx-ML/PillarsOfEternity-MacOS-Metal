@@ -344,6 +344,9 @@ static MTLTextureDescriptor *texture_desc(D3DDevice *d, const d3d_format *f, boo
     td.usage = MTLTextureUsageShaderRead;
     if (f->swizzle || f->pf_srgb != MTLPixelFormatInvalid) td.usage |= MTLTextureUsagePixelFormatView;
     if (usage & (D3DUSAGE_RENDERTARGET | D3DUSAGE_DEPTHSTENCIL)) td.usage |= MTLTextureUsageRenderTarget;
+    /* Port MSAA: the copy into the multisampled twin reads the stencil
+       through a stencil view (single_to_twin in rt_d3d9_draw.m). */
+    if (f->depth && f->stencil && rt_portgfx_get(RT_GFX_MSAA) != 0) td.usage |= MTLTextureUsagePixelFormatView;
     td.storageMode = (usage & (D3DUSAGE_RENDERTARGET | D3DUSAGE_DEPTHSTENCIL)) || f->depth || samples > 1
                          ? MTLStorageModePrivate
                          : MTLStorageModeShared;
@@ -1034,6 +1037,16 @@ void rt_com_D3DVolumeTexture9_AddDirtyBox(_cpu *cpu)
 
 /* ---------------------------------------------------------------- surfaces */
 
+uint32_t d3d_forced_samples(D3DDevice *d, const uint32_t *pp)
+{
+    if (rt_portgfx_get(RT_GFX_MSAA) == 0 || pp[PP_MSAA] != 0 || (pp[PP_FLAGS] & D3DPRESENTFLAG_LOCKABLE_BACKBUFFER))
+        return 1;
+    if (![d->mtl supportsTextureSampleCount:4])
+        rt_fatal("D3D9: port MSAA: the GPU has no 4-sample render targets. Set \"4x Multisample Anti-aliasing\" to Off "
+                 "in the launcher window.");
+    return 4;
+}
+
 static uint32_t msaa_samples(uint32_t type)
 {
     if (type == 1) return 4; /* D3DMULTISAMPLE_NONMASKABLE */
@@ -1445,6 +1458,12 @@ uint32_t d3d_readback(D3DDevice *d, D3DSurface *src, D3DSurface *dst)
     if (tex == nil || src->msaa > 0 || src->width != dst->width || src->height != dst->height || src->fmt != dst->fmt ||
         !sysmem_of(dst, &mem, &pitch))
         return D3DERR_INVALIDCALL;
+    /* Port MSAA: the game sees a single-sample back buffer. */
+    if (tex.sampleCount > 1)
+    {
+        d3d_end_pass(d);
+        tex = d3d_resolved_copy(d, tex);
+    }
     read_pixels(d, tex, slice, level, src->f, src->width, src->height, mem, pitch, surface_last_use(src));
     return D3D_OK;
 }

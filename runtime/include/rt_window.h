@@ -47,6 +47,9 @@ bool rt_cocoa_is_main_thread(void);
    the main thread before any other function of this interface. headless:
    the application never shows a window and never becomes active. */
 void rt_cocoa_init(bool headless);
+/* Game controller input (rt_gamepad.m). Main thread, once, after
+   rt_cocoa_init; not in headless mode. */
+void rt_gamepad_init(void);
 bool rt_cocoa_headless(void);
 
 /* The height of the title bar of a titled window (any thread, after
@@ -69,6 +72,12 @@ typedef struct rt_display {
 /* The displays, the main display first. Returns the number of displays
    (at least 1; stops the process when no display is available). */
 int rt_cocoa_displays(rt_display out[RT_MAX_DISPLAYS]);
+
+/* Any thread. The shortest refresh interval in seconds
+   (NSScreen.minimumRefreshInterval: 1/120 on a ProMotion screen) of the
+   display that holds the point (x, y) in screen coordinates. Returns 0 when
+   no display holds the point. */
+double rt_cocoa_refresh_interval_at(int32_t x, int32_t y);
 
 typedef struct rt_display_mode {
     uint32_t width, height, refresh; /* points, Hz */

@@ -15,6 +15,7 @@
 #   3. LLVM and lld from Homebrew (/opt/homebrew/opt/llvm, /opt/homebrew/opt/lld).
 #   4. The game folder is the parent of the port folder (for the SHA-256
 #      values of the managed assemblies).
+#   5. iconutil (part of macOS), for the application icon (tools/make_icon.c).
 #
 # Result:
 #   build/release/dist/Pillars of Eternity.app
@@ -44,6 +45,9 @@ OBJ="$OUT/obj"
 HOSTOBJ="$REC/lib/objects"
 MODULE_LIST="$PORT_DIR/tools/aot_modules.txt"
 ZIP="$OUT/PillarsOfEternity-Mac-ARM64.zip"
+# The version of the release (CFBundleShortVersionString). The launcher
+# compares it with the tag of the latest GitHub release (rt_launcher.m).
+VERSION=0.2
 # The minimum macOS version of the application. The converter tools of
 # Homebrew (LLVM, lld) need macOS 27.2; tools/build_toolchain.sh builds SRW
 # and llasm for the same version.
@@ -152,6 +156,8 @@ cat > "$HOSTOBJ/player_info.plist" <<PLIST
     <true/>
     <key>NSHighResolutionCapable</key>
     <true/>
+    <key>GCSupportsControllerUserInteraction</key>
+    <true/>
 </dict>
 </plist>
 PLIST
@@ -164,6 +170,12 @@ compile -fobjc-arc -c "$PORT_DIR/runtime/loader/rt_launcher.m" -o "$OBJ/loader_r
 "$LLVM/clang" -target $TRIPLE -fobjc-arc "$OBJ/loader_rt_loader.o" "$OBJ/loader_rt_launcher.o" \
     "$OBJ/loader_rt_convert.o" "$OBJ/loader_rt_aot_asm.o" -framework Cocoa -framework Foundation \
     -o "$APP/Contents/MacOS/PillarsOfEternity"
+
+echo "PROGRESS draw the application icon"
+compile -std=c2x "$PORT_DIR/tools/make_icon.c" -framework ApplicationServices -framework ImageIO -o "$OBJ/make_icon"
+rm -rf "$OBJ/AppIcon.iconset"
+"$OBJ/make_icon" "$OBJ/AppIcon.iconset"
+iconutil -c icns "$OBJ/AppIcon.iconset" -o "$APP/Contents/Resources/AppIcon.icns"
 
 # Copy the libraries that a Mach-O file needs (not the system libraries)
 # into a directory, and refer to them with @rpath.
@@ -306,6 +318,7 @@ cp "$LLD_PREFIX/LICENSE.TXT" "$LIC/LLD-LICENSE.txt"
 cp /opt/homebrew/opt/z3/LICENSE.txt "$LIC/Z3-LICENSE.txt"
 cp /opt/homebrew/opt/zstd/LICENSE "$LIC/ZSTD-LICENSE.txt"
 cp "$PORT_DIR/third_party/SR/README.md" "$LIC/SR-README.md"
+cp "$PORT_DIR/third_party/FidelityFX-FSR/LICENSE.txt" "$LIC/FIDELITYFX-FSR-LICENSE.txt"
 for f in "$REC"/lib/*.dylib; do
     case "$(basename "$f")" in
         libLLVM* | libclang-cpp* | liblld* | libz3* | libzstd*) ;;
@@ -341,8 +354,10 @@ cat > "$APP/Contents/Info.plist" <<PLIST
     <string>Pillars of Eternity</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
+    <key>CFBundleIconFile</key>
+    <string>AppIcon</string>
     <key>CFBundleShortVersionString</key>
-    <string>0.1</string>
+    <string>$VERSION</string>
     <key>CFBundleVersion</key>
     <string>1</string>
     <key>LSApplicationCategoryType</key>

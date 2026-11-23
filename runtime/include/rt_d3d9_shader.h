@@ -24,7 +24,9 @@
  *            buffer 19     float4 ps_misc[5]: [0].x = alpha test function
  *                          (D3DCMPFUNC, 0 = off), [0].y = alpha reference
  *                          (0..1), [0].z = D3D pixels per Metal pixel
- *                          (VPOS); [1 + n / 4][n % 4] = D3DSAMP_MIPMAPLODBIAS
+ *                          (VPOS), [0].w = radius of the filtered shadow
+ *                          lookup (port variant, d3d_shader_msl_ps);
+ *                          [1 + n / 4][n % 4] = D3DSAMP_MIPMAPLODBIAS
  *                          of sampler s#n
  *            buffer 20     float4 blend_color (D3DRS_BLENDFACTOR; only
  *                          with blending in the shader, d3dsh_unorm)
@@ -147,9 +149,23 @@ typedef struct d3dsh_unorm {
    The shader then samples the 2D texture with the .xy components of the
    coordinate. The texld documentation of Direct3D 9: "Sampling a texture
    with fewer dimensions than are present in the texture coordinate is
-   allowed since the extra texture coordinate component(s) are ignored." */
+   allowed since the extra texture coordinate component(s) are ignored."
+   port selects the port's image quality changes of a shader (0 = none):
+     bits 0..4    1 + the sampler s of the filtered shadow lookup: the
+                  shader body runs D3DSH_PCF_TAPS times, each time with an
+                  offset of the coordinate of s from a disk of radius
+                  ps_misc[0].w (texture coordinate units), and the color
+                  outputs are the mean of the runs. The shader must be of
+                  model 2 or later, sample s as a 2D texture, and use no
+                  texkill and no depth output.
+     bits 8..12   1 + the sampler s of the edge-adaptive magnification:
+                  plain 2D samples of s use the EASU filter of AMD
+                  FidelityFX Super Resolution 1 for the color when the
+                  texture is magnified (one texel covers more than one
+                  pixel), and the plain sample otherwise. */
+#define D3DSH_PCF_TAPS 16
 bool d3d_shader_msl_ps(const d3d_shader *ps, const d3dsh_io *vs_outputs, int nvs, uint16_t depth_compare,
-                       uint16_t sm1_tex, uint16_t as_2d, const d3dsh_unorm *unorm, d3dsh_text *out, char *err,
-                       size_t errn);
+                       uint16_t sm1_tex, uint16_t as_2d, uint32_t port, const d3dsh_unorm *unorm, d3dsh_text *out,
+                       char *err, size_t errn);
 
 #endif

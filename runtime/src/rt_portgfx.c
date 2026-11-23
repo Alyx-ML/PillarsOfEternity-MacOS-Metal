@@ -13,11 +13,16 @@
  *   3   anisotropic            0, 1    16x anisotropic filtering
  *   4   supersampled_shadows   0, 1    4x4 storage of the shadow buffers
  *   5   float_render_targets   0, 1    RGBA32Float storage of 8-bit targets
+ *   6   msaa                   0, 1    4x multisampled back buffer
+ *   7   soft_shadows           0, 1    filtered shadow map lookups
+ *   8   sharp_backgrounds      0, 1    edge-adaptive magnification of the
+ *                                      painted background tiles
  *
  * Settings 0 to 3 take effect at the next frame. Settings 4 and 5 change the
  * storage of render targets when the runtime makes them; a target cannot
  * change its storage, so these two take effect at the next start of the
- * program. rt_portgfx_get gives the value in effect, PortGfxGet the saved
+ * program. Settings 6 to 8 are rows of the launcher window only, so they
+ * also take effect at the next start. rt_portgfx_get gives the value in effect, PortGfxGet the saved
  * value.
  *
  * The settings file (rt_portgfx_init) has one "key value" line for each
@@ -111,11 +116,18 @@ void rt_portgfx_init(const char *path)
         fclose(f);
     }
     for (i = 0; i < RT_GFX_COUNT; i++) atomic_store(&active[i], atomic_load(&saved[i]));
-    rt_log("graphics settings: upscaling %d, sharpness %d, hdr %d, anisotropic %d, supersampled shadows %d, "
-           "float render targets %d",
-           atomic_load(&active[RT_GFX_UPSCALING]), atomic_load(&active[RT_GFX_SHARPNESS]),
-           atomic_load(&active[RT_GFX_HDR]), atomic_load(&active[RT_GFX_ANISOTROPIC]),
-           atomic_load(&active[RT_GFX_SHADOWS]), atomic_load(&active[RT_GFX_FLOAT_TARGETS]));
+    {
+        char msg[512];
+        size_t len = 0;
+        for (i = 0; i < RT_GFX_COUNT; i++)
+        {
+            int r = snprintf(msg + len, sizeof msg - len, "%s%s %d", i ? ", " : "", rt_gfx_defs[i].key,
+                             atomic_load(&active[i]));
+            if (r < 0 || (size_t)r >= sizeof msg - len) rt_fatal("graphics settings: the log line is too long");
+            len += (size_t)r;
+        }
+        rt_log("graphics settings: %s", msg);
+    }
     cfg_ready = true;
 }
 

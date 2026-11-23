@@ -526,6 +526,7 @@ typedef struct gen {
     bool co_defer;                    /* assign writes to "co" (first instruction of a co-issued pair) */
     uint8_t stype[D3DSH_MAX_SAMPLERS]; /* sampler types (D3DSTT_*) of this variant */
     int8_t proj[D3DSH_MAX_SAMPLERS];  /* shader model 1: projection divisor component, -1 = none */
+    int pcf_s, easu_s;                /* port variant samplers (d3d_shader_msl_ps), -1 = none */
     uint32_t labels[MAX_LABELS]; /* token position of each label instruction, 0 = none */
 } gen;
 
@@ -893,6 +894,20 @@ static void tex_sample(gen *g, const inst *in, uint32_t dtok, uint32_t ptok, con
         ex_set(g, &c, st == D3DSTT_2D ? "((%s).xy / (%s).%c)" : "((%s).xyz / (%s).%c)", coord, coord, pc);
     else
         ex_set(g, &c, st == D3DSTT_2D ? "(%s).xy" : "(%s).xyz", coord);
+    if ((int)s == g->pcf_s || (int)s == g->easu_s)
+    {
+        if (st != D3DSTT_2D)
+        {
+            fail(g, "port variant sampler s%u is not a 2D sampler", s);
+            return;
+        }
+        if ((int)s == g->pcf_s)
+        {
+            expr o;
+            ex_set(g, &o, "(%s + pcf_off)", c.s);
+            c = o;
+        }
+    }
     if (g->depth_compare & (1u << s))
     {
         if (st != D3DSTT_2D || lod || grad || bias)
@@ -924,7 +939,10 @@ static void tex_sample(gen *g, const inst *in, uint32_t dtok, uint32_t ptok, con
             fail(g, "vertex shader texture instruction without a level (texldl is required)");
             return;
         }
-        ex_set(g, &v, "t%u.sample(s%u, %s, bias(%s))%s", s, s, c.s, lb, swz);
+        if ((int)s == g->easu_s)
+            ex_set(g, &v, "d3d_easu(t%u, s%u, %s, %s)%s", s, s, c.s, lb, swz);
+        else
+            ex_set(g, &v, "t%u.sample(s%u, %s, bias(%s))%s", s, s, c.s, lb, swz);
     }
     assign(g, in, dtok, ptok, v.s);
 }
@@ -1091,6 +1109,11 @@ static void gen_inst(gen *g, const inst *in)
         expr r;
         char cond[96] = "";
         size_t len = 0;
+        if (g->pcf_s >= 0)
+        {
+            fail(g, "texkill in a shader with the filtered shadow lookup");
+            return;
+        }
         if (in->n < 1)
         {
             fail(g, "texkill without operand");
@@ -1385,6 +1408,7 @@ static bool gen_init(gen *g, const d3d_shader *sh, d3dsh_text *out, char *err, s
     g->sm1 = sh->is_ps && sh->version < 0x200;
     memcpy(g->stype, sh->sampler_type, sizeof g->stype);
     memset(g->proj, -1, sizeof g->proj);
+    g->pcf_s = g->easu_s = -1;
     memset(out, 0, sizeof *out);
     while (next_inst(sh->tokens, sh->ntokens, &pos, &in, &end, err, errn))
     {
@@ -1625,9 +1649,111 @@ static bool blend_op_msl(char *buf, size_t n, uint8_t op, const char *sv, const 
     }
 }
 
+/* The port's edge-adaptive magnification (d3d_shader_msl_ps, port bits
+   8..12): the EASU filter of AMD FidelityFX Super Resolution 1 for one
+   sample. Source: FsrEasuF, FsrEasuSetF and FsrEasuTapF of ffx_fsr1.h,
+   version 1.20210629, Copyright (c) 2021 Advanced Micro Devices, Inc., MIT
+   License (github.com/GPUOpen-Effects/FidelityFX-FSR). Changes for one
+   sample of a magnified texture: the position of 'f' comes from the
+   texture coordinate and the texture size, not from an output pixel and
+   FsrEasuCon; the approximate reciprocals (APrxLoRcpF1, APrxLoRsqF1) are
+   exact, with the divisor of the edge length limited to 1/32768 or more.
+   When one texel covers one pixel or less, the result is the plain sample. */
+static const char easu_msl[] =
+    "static inline void easu_set(thread float2 &dir, thread float &len, float w, float lA, float lB, float lC,\n"
+    "                            float lD, float lE)\n"
+    "{\n"
+    "    float dc = lD - lC, cb = lC - lB;\n"
+    "    float lenX = 1.0 / max(max(abs(dc), abs(cb)), 1.0 / 32768.0);\n"
+    "    float dirX = lD - lB;\n"
+    "    dir.x += dirX * w;\n"
+    "    lenX = saturate(abs(dirX) * lenX);\n"
+    "    lenX *= lenX;\n"
+    "    len += lenX * w;\n"
+    "    float ec = lE - lC, ca = lC - lA;\n"
+    "    float lenY = 1.0 / max(max(abs(ec), abs(ca)), 1.0 / 32768.0);\n"
+    "    float dirY = lE - lA;\n"
+    "    dir.y += dirY * w;\n"
+    "    lenY = saturate(abs(dirY) * lenY);\n"
+    "    lenY *= lenY;\n"
+    "    len += lenY * w;\n"
+    "}\n\n"
+    "static inline void easu_tap(thread float3 &aC, thread float &aW, float2 off, float2 dir, float2 len, float lob,\n"
+    "                            float clp, float3 c)\n"
+    "{\n"
+    "    float2 v = float2(off.x * dir.x + off.y * dir.y, off.x * -dir.y + off.y * dir.x) * len;\n"
+    "    float d2 = min(dot(v, v), clp);\n"
+    "    float wB = 0.4 * d2 - 1.0, wA = lob * d2 - 1.0;\n"
+    "    wB *= wB;\n"
+    "    wA *= wA;\n"
+    "    wB = 1.5625 * wB - 0.5625;\n"
+    "    float w = wB * wA;\n"
+    "    aC += c * w;\n"
+    "    aW += w;\n"
+    "}\n\n"
+    "static float4 d3d_easu(texture2d<float> t, sampler s, float2 uv, float lb)\n"
+    "{\n"
+    "    float2 size = float2(float(t.get_width()), float(t.get_height()));\n"
+    "    float2 fw = fwidth(uv * size);\n"
+    "    float4 base = t.sample(s, uv, bias(lb));\n"
+    "    if (max(fw.x, fw.y) >= 1.0 || size.x < 4.0 || size.y < 4.0) return base;\n"
+    "    float2 rcp = 1.0 / size;\n"
+    "    float2 pp = uv * size - 0.5;\n"
+    "    float2 fp = floor(pp);\n"
+    "    pp -= fp;\n"
+    "    float2 p0 = (fp + float2(1.0, -1.0)) * rcp, p1 = (fp + float2(0.0, 1.0)) * rcp;\n"
+    "    float2 p2 = (fp + float2(2.0, 1.0)) * rcp, p3 = (fp + float2(1.0, 3.0)) * rcp;\n"
+    "    float4 bczzR = t.gather(s, p0, int2(0), component::x), bczzG = t.gather(s, p0, int2(0), component::y);\n"
+    "    float4 bczzB = t.gather(s, p0, int2(0), component::z), ijfeR = t.gather(s, p1, int2(0), component::x);\n"
+    "    float4 ijfeG = t.gather(s, p1, int2(0), component::y), ijfeB = t.gather(s, p1, int2(0), component::z);\n"
+    "    float4 klhgR = t.gather(s, p2, int2(0), component::x), klhgG = t.gather(s, p2, int2(0), component::y);\n"
+    "    float4 klhgB = t.gather(s, p2, int2(0), component::z), zzonR = t.gather(s, p3, int2(0), component::x);\n"
+    "    float4 zzonG = t.gather(s, p3, int2(0), component::y), zzonB = t.gather(s, p3, int2(0), component::z);\n"
+    "    float4 bczzL = bczzB * 0.5 + (bczzR * 0.5 + bczzG), ijfeL = ijfeB * 0.5 + (ijfeR * 0.5 + ijfeG);\n"
+    "    float4 klhgL = klhgB * 0.5 + (klhgR * 0.5 + klhgG), zzonL = zzonB * 0.5 + (zzonR * 0.5 + zzonG);\n"
+    "    float bL = bczzL.x, cL = bczzL.y, iL = ijfeL.x, jL = ijfeL.y, fL = ijfeL.z, eL = ijfeL.w;\n"
+    "    float kL = klhgL.x, lL = klhgL.y, hL = klhgL.z, gL = klhgL.w, oL = zzonL.z, nL = zzonL.w;\n"
+    "    float2 dir = float2(0.0);\n"
+    "    float len = 0.0;\n"
+    "    easu_set(dir, len, (1.0 - pp.x) * (1.0 - pp.y), bL, eL, fL, gL, jL);\n"
+    "    easu_set(dir, len, pp.x * (1.0 - pp.y), cL, fL, gL, hL, kL);\n"
+    "    easu_set(dir, len, (1.0 - pp.x) * pp.y, fL, iL, jL, kL, nL);\n"
+    "    easu_set(dir, len, pp.x * pp.y, gL, jL, kL, lL, oL);\n"
+    "    float2 dir2 = dir * dir;\n"
+    "    float dirR = dir2.x + dir2.y;\n"
+    "    bool zro = dirR < 1.0 / 32768.0;\n"
+    "    dirR = zro ? 1.0 : rsqrt(dirR);\n"
+    "    dir.x = zro ? 1.0 : dir.x;\n"
+    "    dir *= dirR;\n"
+    "    len = len * 0.5;\n"
+    "    len *= len;\n"
+    "    float stretch = dot(dir, dir) / max(abs(dir.x), abs(dir.y));\n"
+    "    float2 len2 = float2(1.0 + (stretch - 1.0) * len, 1.0 - 0.5 * len);\n"
+    "    float lob = 0.5 + ((1.0 / 4.0 - 0.04) - 0.5) * len;\n"
+    "    float clp = 1.0 / lob;\n"
+    "    float3 cf = float3(ijfeR.z, ijfeG.z, ijfeB.z), cg = float3(klhgR.w, klhgG.w, klhgB.w);\n"
+    "    float3 cj = float3(ijfeR.y, ijfeG.y, ijfeB.y), ck = float3(klhgR.x, klhgG.x, klhgB.x);\n"
+    "    float3 min4 = min(min(cf, cg), min(cj, ck)), max4 = max(max(cf, cg), max(cj, ck));\n"
+    "    float3 aC = float3(0.0);\n"
+    "    float aW = 0.0;\n"
+    "    easu_tap(aC, aW, float2(0.0, -1.0) - pp, dir, len2, lob, clp, float3(bczzR.x, bczzG.x, bczzB.x));\n"
+    "    easu_tap(aC, aW, float2(1.0, -1.0) - pp, dir, len2, lob, clp, float3(bczzR.y, bczzG.y, bczzB.y));\n"
+    "    easu_tap(aC, aW, float2(-1.0, 1.0) - pp, dir, len2, lob, clp, float3(ijfeR.x, ijfeG.x, ijfeB.x));\n"
+    "    easu_tap(aC, aW, float2(0.0, 1.0) - pp, dir, len2, lob, clp, cj);\n"
+    "    easu_tap(aC, aW, float2(0.0, 0.0) - pp, dir, len2, lob, clp, cf);\n"
+    "    easu_tap(aC, aW, float2(-1.0, 0.0) - pp, dir, len2, lob, clp, float3(ijfeR.w, ijfeG.w, ijfeB.w));\n"
+    "    easu_tap(aC, aW, float2(1.0, 1.0) - pp, dir, len2, lob, clp, ck);\n"
+    "    easu_tap(aC, aW, float2(2.0, 1.0) - pp, dir, len2, lob, clp, float3(klhgR.y, klhgG.y, klhgB.y));\n"
+    "    easu_tap(aC, aW, float2(2.0, 0.0) - pp, dir, len2, lob, clp, float3(klhgR.z, klhgG.z, klhgB.z));\n"
+    "    easu_tap(aC, aW, float2(1.0, 0.0) - pp, dir, len2, lob, clp, cg);\n"
+    "    easu_tap(aC, aW, float2(1.0, 2.0) - pp, dir, len2, lob, clp, float3(zzonR.z, zzonG.z, zzonB.z));\n"
+    "    easu_tap(aC, aW, float2(0.0, 2.0) - pp, dir, len2, lob, clp, float3(zzonR.w, zzonG.w, zzonB.w));\n"
+    "    return float4(min(max4, max(min4, aC / aW)), base.a);\n"
+    "}\n\n";
+
 bool d3d_shader_msl_ps(const d3d_shader *ps, const d3dsh_io *vs_outputs, int nvs, uint16_t depth_compare,
-                       uint16_t sm1_tex, uint16_t as_2d, const d3dsh_unorm *unorm, d3dsh_text *out, char *err,
-                       size_t errn)
+                       uint16_t sm1_tex, uint16_t as_2d, uint32_t port, const d3dsh_unorm *unorm, d3dsh_text *out,
+                       char *err, size_t errn)
 {
     gen g;
     int k, nmembers = 0;
@@ -1664,6 +1790,21 @@ bool d3d_shader_msl_ps(const d3d_shader *ps, const d3dsh_io *vs_outputs, int nvs
         }
     }
     need_pos = ps->uses_vpos || ps->writes_depth;
+    if (port & ~0x1F1Fu) fail(&g, "port variant 0x%x has unknown bits", port);
+    g.pcf_s = (int)(port & 0x1Fu) - 1;
+    g.easu_s = (int)((port >> 8) & 0x1Fu) - 1;
+    if (g.pcf_s >= D3DSH_MAX_SAMPLERS || g.easu_s >= D3DSH_MAX_SAMPLERS || (g.pcf_s >= 0 && g.pcf_s == g.easu_s))
+        fail(&g, "port variant 0x%x has a bad sampler", port);
+    else if ((g.pcf_s >= 0 && ps->sampler_type[g.pcf_s] == 0) || (g.easu_s >= 0 && ps->sampler_type[g.easu_s] == 0))
+        fail(&g, "port variant 0x%x names a sampler that the shader does not declare", port);
+    if (g.pcf_s >= 0 && (g.sm1 || ps->writes_depth))
+        fail(&g, "the filtered shadow lookup needs a shader of model 2 or later without a depth output");
+    if (g.pcf_s >= 0)
+        emit(&g, "static inline float2 d3d_pcf_tap(int i)\n{\n"
+                 "    float r = sqrt((float(i) + 0.5) / %d.0), a = float(i) * 2.39996323;\n"
+                 "    return r * float2(cos(a), sin(a));\n}\n\n",
+             D3DSH_PCF_TAPS);
+    if (g.easu_s >= 0) emit(&g, "%s", easu_msl);
 
     for (k = 0; k < ps->ninputs; k++)
     {
@@ -1711,6 +1852,16 @@ bool d3d_shader_msl_ps(const d3d_shader *ps, const d3dsh_io *vs_outputs, int nvs
                undefined. */
             emit(&g, "float4 v%u = float4(0.0);\n", e->reg);
     }
+    if (g.pcf_s >= 0)
+    {
+        /* The filtered shadow lookup: the body once for each disk tap (a
+           Vogel spiral), and the mean of the color outputs. */
+        for (k = 0; k < 4; k++)
+            emit(&g, "float4 pcf_sum%d = float4(0.0);\n", k);
+        emit(&g, "for (int pcf_i = 0; pcf_i < %d; pcf_i++) {\n", D3DSH_PCF_TAPS);
+        g.indent++;
+        emit(&g, "float2 pcf_off = d3d_pcf_tap(pcf_i) * ps_misc[0].w;\n");
+    }
     declare_temps(&g);
     if (g.sm1)
         for (k = 0; k < 4; k++)
@@ -1720,6 +1871,15 @@ bool d3d_shader_msl_ps(const d3d_shader *ps, const d3dsh_io *vs_outputs, int nvs
     if (ps->writes_depth) emit(&g, "float oDepth = fpos.z;\n");
     gen_block(&g, 1);
     if (g.sm1) emit(&g, "oC0 = r0;\n");
+    if (g.pcf_s >= 0)
+    {
+        for (k = 0; k < 4; k++)
+            emit(&g, "pcf_sum%d += oC%d;\n", k, k);
+        g.indent--;
+        emit(&g, "}\n");
+        for (k = 0; k < 4; k++)
+            emit(&g, "float4 oC%d = pcf_sum%d * (1.0 / %d.0);\n", k, k, D3DSH_PCF_TAPS);
+    }
     /* Outputs to 8-bit targets that the device stores as 32-bit float
        (d3dsh_unorm): the 0..1 range of the unorm target. */
     for (k = 0; k < 4; k++)

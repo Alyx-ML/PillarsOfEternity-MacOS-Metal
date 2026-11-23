@@ -320,6 +320,9 @@ void rt_PeekNamedPipe(_cpu *cpu); /* kernel32 PeekNamedPipe, 6 stack dwords */
 void rt_PortGfxFail(_cpu *cpu); /* portgfx PortGfxFail, 1 stack dwords */
 void rt_PortGfxGet(_cpu *cpu); /* portgfx PortGfxGet, 1 stack dwords */
 void rt_PortGfxSet(_cpu *cpu); /* portgfx PortGfxSet, 2 stack dwords */
+void rt_PortPadCapture(_cpu *cpu); /* portgfx PortPadCapture, 1 stack dwords */
+void rt_PortPadKey(_cpu *cpu); /* portgfx PortPadKey, 2 stack dwords */
+void rt_PortPadRead(_cpu *cpu); /* portgfx PortPadRead, 1 stack dwords */
 void rt_PostQuitMessage(_cpu *cpu); /* user32 PostQuitMessage, 1 stack dwords */
 void rt_QueryPerformanceCounter(_cpu *cpu); /* kernel32 QueryPerformanceCounter, 1 stack dwords */
 void rt_QueryPerformanceFrequency(_cpu *cpu); /* kernel32 QueryPerformanceFrequency, 1 stack dwords */

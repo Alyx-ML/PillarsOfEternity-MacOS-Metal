@@ -98,6 +98,7 @@ namespace PortGraphics
 
         public static void Tick()
         {
+            PortController.Tick();
             try
             {
                 UIOptionsManager mgr = UIOptionsManager.Instance;

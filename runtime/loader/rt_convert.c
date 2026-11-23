@@ -179,7 +179,8 @@ static const char *const link_libs[] = {
     "-framework", "CoreFoundation", "-framework", "CoreServices", "-framework", "Security", "-framework", "CFNetwork",
     "-framework", "IOKit", "-framework", "AppKit", "-framework", "Carbon", "-framework", "Metal",
     "-framework", "QuartzCore", "-framework", "CoreGraphics", "-framework", "CoreText", "-framework", "ImageIO",
-    "-framework", "AudioToolbox", "-framework", "MetalFX", "-framework", "CoreAudio", "-lresolv", "-lSystem",
+    "-framework", "AudioToolbox", "-framework", "MetalFX", "-framework", "CoreAudio", "-framework", "GameController",
+    "-lresolv", "-lSystem",
 };
 #define NLINK_LIBS (sizeof link_libs / sizeof link_libs[0])
 

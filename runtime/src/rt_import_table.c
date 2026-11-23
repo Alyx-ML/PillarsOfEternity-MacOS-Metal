@@ -460,6 +460,9 @@ extern char wglShareLists_asm2c[];
 extern char PortGfxFail_asm2c[];
 extern char PortGfxGet_asm2c[];
 extern char PortGfxSet_asm2c[];
+extern char PortPadCapture_asm2c[];
+extern char PortPadKey_asm2c[];
+extern char PortPadRead_asm2c[];
 extern char EnumProcessModules_asm2c[];
 extern char EnumProcesses_asm2c[];
 extern char GetModuleBaseNameW_asm2c[];
@@ -1114,6 +1117,9 @@ const rt_import_entry rt_import_table[] = {
     { "portgfx", "PortGfxFail", 0, PortGfxFail_asm2c },
     { "portgfx", "PortGfxGet", 0, PortGfxGet_asm2c },
     { "portgfx", "PortGfxSet", 0, PortGfxSet_asm2c },
+    { "portgfx", "PortPadCapture", 0, PortPadCapture_asm2c },
+    { "portgfx", "PortPadKey", 0, PortPadKey_asm2c },
+    { "portgfx", "PortPadRead", 0, PortPadRead_asm2c },
     { "psapi", "EnumProcessModules", 0, EnumProcessModules_asm2c },
     { "psapi", "EnumProcesses", 0, EnumProcesses_asm2c },
     { "psapi", "GetModuleBaseNameW", 0, GetModuleBaseNameW_asm2c },
@@ -1308,4 +1314,4 @@ const rt_import_entry rt_import_table[] = {
     { "ws2_32", NULL, 8, ord_ws2_32_8_asm2c },
     { "ws2_32", NULL, 9, ord_ws2_32_9_asm2c },
 };
-const unsigned rt_import_table_count = 652;
+const unsigned rt_import_table_count = 655;

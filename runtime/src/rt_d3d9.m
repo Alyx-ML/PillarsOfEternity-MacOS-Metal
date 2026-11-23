@@ -41,8 +41,6 @@
 #define D3DCREATE_HARDWARE_VERTEXPROCESSING 0x40u
 #define D3DCREATE_MIXED_VERTEXPROCESSING 0x80u
 
-#define D3DPRESENTFLAG_LOCKABLE_BACKBUFFER 1u
-
 /* UNCONFIRMED: recalled IIDs (d3d9.h); QueryInterface with an unknown IID
    stops the process with the IID text. */
 static const rt_guid IID_IDirect3D9 = { 0x81BDCBCAu, 0x64D4, 0x426D, { 0xAE, 0x8D, 0xAD, 0x01, 0x47, 0xF4, 0x27, 0x5C } };
@@ -531,6 +529,8 @@ static void new_command_buffer(D3DDevice *d)
                      b.error.localizedDescription.UTF8String, (long)b.error.code,
                      has_u ? u.domain.UTF8String : "(none)", has_u ? (long)u.code : 0L);
         }
+        if (!discarded && b.GPUEndTime > b.GPUStartTime)
+            atomic_fetch_add(&dev->gpu_ns, (uint64_t)((b.GPUEndTime - b.GPUStartTime) * 1e9));
         if (pthread_mutex_lock(&dev->done_lock) != 0) rt_fatal("D3D9: completion lock failed");
         if (discarded)
         {
@@ -835,11 +835,22 @@ static uint32_t check_pp(D3DDevice *d, uint32_t hwnd)
 /* Create the back buffer and the automatic depth-stencil surface. */
 static uint32_t create_swap_surfaces(D3DDevice *d)
 {
-    uint32_t *pp = d->pp, r;
+    uint32_t *pp = d->pp, r, forced = d3d_forced_samples(d, pp);
     r = d3d_create_surface(d, pp[PP_WIDTH], pp[PP_HEIGHT], pp[PP_FORMAT], D3DUSAGE_RENDERTARGET, D3DPOOL_DEFAULT,
-                           pp[PP_MSAA], pp[PP_MSAA_QUALITY], (pp[PP_FLAGS] & D3DPRESENTFLAG_LOCKABLE_BACKBUFFER) != 0,
-                           true, &d->backbuffer);
+                           forced > 1 ? forced : pp[PP_MSAA], forced > 1 ? 0 : pp[PP_MSAA_QUALITY],
+                           (pp[PP_FLAGS] & D3DPRESENTFLAG_LOCKABLE_BACKBUFFER) != 0, true, &d->backbuffer);
     if (r != D3D_OK) return r;
+    if (forced > 1)
+    {
+        /* Port MSAA: the game requested no multisampling, so the surface
+           reports none (GetDesc), and the depth-stencil surfaces that the
+           game uses with it get multisampled twins (begin_pass). */
+        D3DSurface *bs = d3d_surf(d->backbuffer);
+        bs->msaa = 0;
+        bs->msaa_quality = 0;
+        bs->forced_ms = true;
+        rt_log("D3D9: port MSAA: the back buffer has %u samples", forced);
+    }
     if (pp[PP_AUTODS])
     {
         r = d3d_create_surface(d, pp[PP_WIDTH], pp[PP_HEIGHT], pp[PP_AUTODS_FORMAT], D3DUSAGE_DEPTHSTENCIL,

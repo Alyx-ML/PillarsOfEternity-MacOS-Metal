@@ -276,6 +276,16 @@ void rt_user32_post_raw(uint32_t hwnd, uint32_t wparam, uint32_t lparam);
 uint32_t rt_user32_raw_target(void);
 /* The cursor position of the last mouse event (screen coordinates). */
 void rt_user32_mouse_pos(int32_t *x, int32_t *y);
+/* Game controller input (rt_gamepad.m), main thread. The events go to the
+   window that gets raw input (rt_user32_raw_target), at the cursor; they
+   do nothing when the program has no such window.
+   pad_move: move the cursor by (dx, dy) pixels, inside the client area of
+   the window. pad_button: 0 left, 1 right, 2 middle. pad_wheel: one notch
+   is 120. pad_key: a macOS virtual key code (kVK_*). */
+void rt_user32_pad_move(int32_t dx, int32_t dy);
+void rt_user32_pad_button(int button, bool down);
+void rt_user32_pad_wheel(int32_t delta);
+void rt_user32_pad_key(uint16_t mac_keycode, bool down);
 /* Headless mode (rt_user32_set_headless). */
 bool rt_user32_headless(void);
 /* Register the runtime classes; main thread, before guest code runs. */

@@ -320,6 +320,9 @@ funcv rt_PeekNamedPipe $
 funcv rt_PortGfxFail $
 funcv rt_PortGfxGet $
 funcv rt_PortGfxSet $
+funcv rt_PortPadCapture $
+funcv rt_PortPadKey $
+funcv rt_PortPadRead $
 funcv rt_PostQuitMessage $
 funcv rt_QueryPerformanceCounter $
 funcv rt_QueryPerformanceFrequency $
@@ -3492,6 +3495,33 @@ proc PortGfxSet_asm2c public
         call rt_PortGfxSet $
         load tmp1, esp, 4
         add esp, esp, 12
+        call rt_code_target tmp1
+        tcall tmp0
+endp
+
+proc PortPadCapture_asm2c public
+; portgfx PortPadCapture
+        call rt_PortPadCapture $
+        load tmp1, esp, 4
+        add esp, esp, 8
+        call rt_code_target tmp1
+        tcall tmp0
+endp
+
+proc PortPadKey_asm2c public
+; portgfx PortPadKey
+        call rt_PortPadKey $
+        load tmp1, esp, 4
+        add esp, esp, 12
+        call rt_code_target tmp1
+        tcall tmp0
+endp
+
+proc PortPadRead_asm2c public
+; portgfx PortPadRead
+        call rt_PortPadRead $
+        load tmp1, esp, 4
+        add esp, esp, 8
         call rt_code_target tmp1
         tcall tmp0
 endp

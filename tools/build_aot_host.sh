@@ -259,7 +259,7 @@ fi
     -framework CoreFoundation -framework CoreServices -framework Security -framework CFNetwork \
     -framework IOKit -framework AppKit -framework Carbon -framework Metal -framework QuartzCore \
     -framework CoreGraphics -framework CoreText -framework ImageIO -framework AudioToolbox -framework MetalFX \
-    -framework CoreAudio -lresolv -o "$OUT"
+    -framework CoreAudio -framework GameController -lresolv -o "$OUT"
 codesign --force --sign - "$OUT"
 if [ $PLAYER -eq 1 ]; then
     rm -rf "$ROOT/aot"

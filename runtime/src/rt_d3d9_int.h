@@ -231,6 +231,17 @@ const d3d_format *d3d_format_storage(id<MTLDevice> mtl, const d3d_format *f, uin
     uint32_t lock_flags;
     uint64_t last_use;
     uint32_t scale; /* standalone surfaces: Metal size = D3D size x scale */
+    /* Port MSAA (RT_GFX_MSAA, d3d_forced_samples): the back buffer of a
+       device whose game requests no multisampling has multisampled storage
+       (forced_ms; msaa stays 0, so the game sees a single-sample surface).
+       A single-sample depth-stencil surface that is used with such a back
+       buffer gets a multisampled twin. twin_state tells which storage has
+       the newer content: 0 both are the same, 1 the twin, 2 the
+       single-sample storage (begin_pass in rt_d3d9_draw.m copies the newer
+       content before a pass uses the other storage). */
+    bool forced_ms;
+    id<MTLTexture> ms_twin;
+    uint8_t twin_state;
 }
 @end
 
@@ -333,6 +344,14 @@ typedef struct d3d_stream {
     uint64_t present_serial[D3D_FRAMES_IN_FLIGHT];
     uint32_t present_count;
     bool presented; /* a frame went to a drawable (for the log) */
+    /* Frame pacing when the game uses VSync (pace_interval in
+       rt_d3d9_draw.m). */
+    _Atomic uint64_t gpu_ns; /* GPU time of the command buffers that completed after the last Present */
+    double pace_return;      /* the time when the last Present returned (mono_seconds) */
+    double pace_cost;        /* the smoothed time of a frame (seconds) */
+    uint32_t pace_k;         /* refresh intervals for each frame (0: not set) */
+    uint32_t pace_fast;      /* frames in sequence that fit in pace_k - 1 intervals */
+    uint32_t pace_logs;      /* log lines about pacing changes */
 
     /* Creation and presentation. */
     uint32_t adapter, devtype, focus_hwnd, behavior;
@@ -441,6 +460,13 @@ typedef struct d3d_stream {
     /* The single-sample copy of a multisampled StretchRect source that is
        not a plain resolve (another size, rectangle or format). */
     id<MTLTexture> stretch_resolve;
+    /* Port MSAA: the pipeline that copies a single-sample depth-stencil
+       surface into its multisampled twin (single_to_twin in
+       rt_d3d9_draw.m), for the pixel format and sample count in the key. */
+    id<MTLRenderPipelineState> ds_upload_pso;
+    id<MTLDepthStencilState> ds_upload_dss;
+    MTLPixelFormat ds_upload_pf;
+    NSUInteger ds_upload_samples;
 }
 @end
 
@@ -568,6 +594,7 @@ typedef struct d3d_stream {
 #define PP_AUTODS 9
 #define PP_AUTODS_FORMAT 10
 #define PP_FLAGS 11
+#define D3DPRESENTFLAG_LOCKABLE_BACKBUFFER 1u
 #define PP_REFRESH 12
 #define PP_INTERVAL 13
 
@@ -708,6 +735,12 @@ rt_com_object *d3d_surface_from_ptr(uint32_t p);
 /* Read the surface pixels into the guest memory of a system-memory
    surface (GetRenderTargetData). */
 uint32_t d3d_readback(D3DDevice *d, D3DSurface *src, D3DSurface *dst);
+/* The sample count of the port MSAA (RT_GFX_MSAA) for the back buffer of a
+   device with the present parameters pp, or 1 for no port MSAA. */
+uint32_t d3d_forced_samples(D3DDevice *d, const uint32_t *pp);
+/* A single-sample copy of the multisampled texture src (one texture of the
+   device, valid until the next call; in command order on d->cb). */
+id<MTLTexture> d3d_resolved_copy(D3DDevice *d, id<MTLTexture> src);
 uint32_t d3d_restore_lost_mips(D3DDevice *d);
 /* Copy a system-memory texture to a default-pool texture (UpdateTexture). */
 uint32_t d3d_update_texture(D3DDevice *d, D3DTexture *src, D3DTexture *dst);

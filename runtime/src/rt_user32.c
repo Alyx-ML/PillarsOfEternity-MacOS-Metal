@@ -4971,6 +4971,85 @@ void rt_user32_ime_cancel(uint32_t himc)
     ime_discard(target);
 }
 
+/* ---------------------------------------------------------------- game controller (rt_gamepad.m) */
+
+/* The window for controller input and the cursor position in its client
+   area, limited to the client area. False if there is no window. */
+static bool pad_target(uint32_t *hwnd, int32_t *x, int32_t *y, int32_t *ox, int32_t *oy, int32_t *w, int32_t *h)
+{
+    uint32_t t = rt_user32_raw_target();
+    int32_t cx, cy;
+    wnd *win;
+    rt_rect c;
+    if (t == 0) return false;
+    lock();
+    win = get(t);
+    if (win == NULL)
+    {
+        unlock();
+        return false;
+    }
+    client_origin(t, ox, oy);
+    c = client_of(win);
+    unlock();
+    *w = c.right - c.left;
+    *h = c.bottom - c.top;
+    if (*w <= 0 || *h <= 0) return false;
+    rt_cocoa_cursor_pos(&cx, &cy);
+    *x = cx - *ox;
+    *y = cy - *oy;
+    if (*x < 0) *x = 0;
+    if (*y < 0) *y = 0;
+    if (*x >= *w) *x = *w - 1;
+    if (*y >= *h) *y = *h - 1;
+    *hwnd = t;
+    return true;
+}
+
+void rt_user32_pad_move(int32_t dx, int32_t dy)
+{
+    uint32_t hwnd;
+    int32_t x, y, ox, oy, w, h, nx, ny;
+    if (!pad_target(&hwnd, &x, &y, &ox, &oy, &w, &h)) return;
+    /* dx, dy are a few pixels for each controller sample: no overflow. */
+    nx = x + dx;
+    ny = y + dy;
+    if (nx < 0) nx = 0;
+    if (ny < 0) ny = 0;
+    if (nx >= w) nx = w - 1;
+    if (ny >= h) ny = h - 1;
+    if (nx == x && ny == y) return;
+    rt_cocoa_cursor_move(ox + nx, oy + ny);
+    rt_user32_on_mouse_motion((double)(nx - x), (double)(ny - y));
+    rt_user32_on_mouse(hwnd, WM_MOUSEMOVE, nx, ny, 0);
+}
+
+void rt_user32_pad_button(int button, bool down)
+{
+    static const uint32_t msgs[3][2] = { { WM_LBUTTONUP, WM_LBUTTONDOWN }, { WM_RBUTTONUP, WM_RBUTTONDOWN },
+                                         { WM_MBUTTONUP, WM_MBUTTONDOWN } };
+    uint32_t hwnd;
+    int32_t x, y, ox, oy, w, h;
+    if (button < 0 || button > 2) rt_fatal("rt_user32_pad_button: button %d", button);
+    if (!pad_target(&hwnd, &x, &y, &ox, &oy, &w, &h)) return;
+    rt_user32_on_mouse(hwnd, msgs[button][down ? 1 : 0], x, y, 0);
+}
+
+void rt_user32_pad_wheel(int32_t delta)
+{
+    uint32_t hwnd;
+    int32_t x, y, ox, oy, w, h;
+    if (!pad_target(&hwnd, &x, &y, &ox, &oy, &w, &h)) return;
+    rt_user32_on_mouse(hwnd, WM_MOUSEWHEEL, x, y, delta);
+}
+
+void rt_user32_pad_key(uint16_t mac_keycode, bool down)
+{
+    if (mac_keycode >= 128 || keys[mac_keycode].vk == 0) rt_fatal("rt_user32_pad_key: no key for code 0x%02x", mac_keycode);
+    if (rt_user32_raw_target() == 0) return;
+    key_input(down, false, mac_keycode, NULL, 0, false);
+}
+
 /* ---------------------------------------------------------------- input script (headless) */
 
 /* rt_user32_input_script: timed mouse and key events for a headless run.

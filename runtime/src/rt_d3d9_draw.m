@@ -187,6 +187,26 @@ static const char builtin_src[] =
     "    o.uv = float2(q.x, 1.0 - q.y);\n"
     "    return o;\n"
     "}\n"
+    /* Port MSAA: copy a single-sample depth-stencil surface into its
+       multisampled twin (single_to_twin). The stencil view (X32_Stencil8)
+       returns the stencil value in r (test on macOS 27.3, 2026-11-23). */
+    "struct DSOut { float depth [[depth(any)]]; uint stencil [[stencil]]; };\n"
+    "fragment DSOut ds_upload_fs(QV in [[stage_in]], depth2d<float> dep [[texture(0)]],\n"
+    "                            texture2d<uint> sten [[texture(1)]])\n"
+    "{\n"
+    "    uint2 p = uint2(in.pos.xy);\n"
+    "    DSOut o;\n"
+    "    o.depth = dep.read(p);\n"
+    "    o.stencil = sten.read(p).r;\n"
+    "    return o;\n"
+    "}\n"
+    "struct DOut { float depth [[depth(any)]]; };\n"
+    "fragment DOut d_upload_fs(QV in [[stage_in]], depth2d<float> dep [[texture(0)]])\n"
+    "{\n"
+    "    DOut o;\n"
+    "    o.depth = dep.read(uint2(in.pos.xy));\n"
+    "    return o;\n"
+    "}\n"
     /* use_lut: apply the gamma ramp of SetGammaRamp. src_linear: the
        source texture is an sRGB format (samples are linear). peak, ka, kb,
        kc: the GT7 curve for the peak of the screen. target_i: the ICtCp
@@ -510,6 +530,149 @@ static void enc_state_reset(D3DDevice *d)
     d->es_null_vb = false;
 }
 
+/* ---------------------------------------------------------------- port MSAA */
+
+static void resolve(D3DDevice *d, id<MTLTexture> src, id<MTLTexture> dst, NSUInteger slice, NSUInteger level);
+
+/* The multisampled twin of the single-sample depth-stencil surface s for a
+   pass with samples samples (D3DSurface.ms_twin). */
+static id<MTLTexture> ds_twin(D3DDevice *d, D3DSurface *s, uint32_t samples)
+{
+    if (s->ms_twin == nil || s->ms_twin.sampleCount != samples)
+    {
+        MTLTextureDescriptor *td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:s->tex.pixelFormat
+                                                                                       width:s->tex.width
+                                                                                      height:s->tex.height
+                                                                                   mipmapped:NO];
+        td.textureType = MTLTextureType2DMultisample;
+        td.sampleCount = samples;
+        td.storageMode = MTLStorageModePrivate;
+        td.usage = MTLTextureUsageRenderTarget;
+        s->ms_twin = [d->mtl newTextureWithDescriptor:td];
+        if (s->ms_twin == nil)
+            rt_fatal("D3D9: out of video memory (%u-sample depth-stencil storage, %ux%u)", samples, s->width, s->height);
+        /* The single-sample storage has the content of the surface if a
+           pass or a clear used it. */
+        s->twin_state = s->last_use != 0 ? 2 : 0;
+        rt_log("D3D9: port MSAA: the depth-stencil surface %ux%u (format 0x%x) has %u-sample storage for the back buffer",
+               s->width, s->height, s->fmt, samples);
+    }
+    return s->ms_twin;
+}
+
+/* Copy the content of the twin of s into the single-sample storage (sample
+   0 of each pixel). */
+static void twin_to_single(D3DDevice *d, D3DSurface *s)
+{
+    MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor renderPassDescriptor];
+    id<MTLRenderCommandEncoder> e;
+    rp.depthAttachment.texture = s->ms_twin;
+    rp.depthAttachment.loadAction = MTLLoadActionLoad;
+    rp.depthAttachment.storeAction = MTLStoreActionMultisampleResolve;
+    rp.depthAttachment.resolveTexture = s->tex;
+    rp.depthAttachment.depthResolveFilter = MTLMultisampleDepthResolveFilterSample0;
+    if (s->f->stencil)
+    {
+        rp.stencilAttachment.texture = s->ms_twin;
+        rp.stencilAttachment.loadAction = MTLLoadActionLoad;
+        rp.stencilAttachment.storeAction = MTLStoreActionMultisampleResolve;
+        rp.stencilAttachment.resolveTexture = s->tex;
+        rp.stencilAttachment.stencilResolveFilter = MTLMultisampleStencilResolveFilterSample0;
+    }
+    rp.renderTargetWidth = s->tex.width;
+    rp.renderTargetHeight = s->tex.height;
+    e = [d->cb renderCommandEncoderWithDescriptor:rp];
+    if (e == nil) rt_fatal("D3D9: depth-stencil resolve encoder creation failed");
+    [e endEncoding];
+    s->twin_state = 0;
+}
+
+/* Copy the content of the single-sample storage of s into each sample of
+   its twin. */
+static void single_to_twin(D3DDevice *d, D3DSurface *s)
+{
+    MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor renderPassDescriptor];
+    id<MTLTexture> twin = s->ms_twin, sten = nil;
+    id<MTLRenderCommandEncoder> e;
+    MTLPixelFormat pf = twin.pixelFormat;
+    if (d->ds_upload_pso == nil || d->ds_upload_pf != pf || d->ds_upload_samples != twin.sampleCount)
+    {
+        MTLRenderPipelineDescriptor *pd = [MTLRenderPipelineDescriptor new];
+        MTLDepthStencilDescriptor *dd = [MTLDepthStencilDescriptor new];
+        NSError *err = nil;
+        pd.vertexFunction = function_of(d->builtin_lib, "present_vs");
+        pd.fragmentFunction = function_of(d->builtin_lib, s->f->stencil ? "ds_upload_fs" : "d_upload_fs");
+        pd.depthAttachmentPixelFormat = pf;
+        if (s->f->stencil) pd.stencilAttachmentPixelFormat = pf;
+        pd.rasterSampleCount = twin.sampleCount;
+        d->ds_upload_pso = [d->mtl newRenderPipelineStateWithDescriptor:pd error:&err];
+        if (d->ds_upload_pso == nil)
+            rt_fatal("D3D9: depth-stencil copy pipeline creation failed: %s", err.localizedDescription.UTF8String);
+        dd.depthCompareFunction = MTLCompareFunctionAlways;
+        dd.depthWriteEnabled = YES;
+        if (s->f->stencil)
+        {
+            MTLStencilDescriptor *sd = [MTLStencilDescriptor new];
+            sd.stencilCompareFunction = MTLCompareFunctionAlways;
+            sd.depthStencilPassOperation = MTLStencilOperationReplace;
+            sd.readMask = 0xFFu;
+            sd.writeMask = 0xFFu;
+            dd.frontFaceStencil = sd;
+            dd.backFaceStencil = sd;
+        }
+        d->ds_upload_dss = [d->mtl newDepthStencilStateWithDescriptor:dd];
+        if (d->ds_upload_dss == nil) rt_fatal("D3D9: depth-stencil copy state creation failed");
+        d->ds_upload_pf = pf;
+        d->ds_upload_samples = twin.sampleCount;
+    }
+    if (s->f->stencil)
+    {
+        sten = [s->tex newTextureViewWithPixelFormat:pf == MTLPixelFormatDepth32Float_Stencil8 ? MTLPixelFormatX32_Stencil8
+                                                                                                : MTLPixelFormatX24_Stencil8];
+        if (sten == nil) rt_fatal("D3D9: stencil view creation failed (depth-stencil format 0x%x)", s->fmt);
+    }
+    rp.depthAttachment.texture = twin;
+    rp.depthAttachment.loadAction = MTLLoadActionDontCare;
+    rp.depthAttachment.storeAction = MTLStoreActionStore;
+    if (s->f->stencil)
+    {
+        rp.stencilAttachment.texture = twin;
+        rp.stencilAttachment.loadAction = MTLLoadActionDontCare;
+        rp.stencilAttachment.storeAction = MTLStoreActionStore;
+    }
+    rp.renderTargetWidth = twin.width;
+    rp.renderTargetHeight = twin.height;
+    e = [d->cb renderCommandEncoderWithDescriptor:rp];
+    if (e == nil) rt_fatal("D3D9: depth-stencil copy encoder creation failed");
+    [e setRenderPipelineState:d->ds_upload_pso];
+    [e setDepthStencilState:d->ds_upload_dss];
+    [e setFragmentTexture:s->tex atIndex:0];
+    if (sten != nil) [e setFragmentTexture:sten atIndex:1];
+    [e drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+    [e endEncoding];
+    s->twin_state = 0;
+}
+
+id<MTLTexture> d3d_resolved_copy(D3DDevice *d, id<MTLTexture> src)
+{
+    id<MTLTexture> rs = d->stretch_resolve;
+    if (rs == nil || rs.width != src.width || rs.height != src.height || rs.pixelFormat != src.pixelFormat)
+    {
+        MTLTextureDescriptor *td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:src.pixelFormat
+                                                                                       width:src.width
+                                                                                      height:src.height
+                                                                                   mipmapped:NO];
+        td.storageMode = MTLStorageModePrivate;
+        td.usage = MTLTextureUsageShaderRead | MTLTextureUsageRenderTarget;
+        rs = [d->mtl newTextureWithDescriptor:td];
+        if (rs == nil) rt_fatal("D3D9: out of video memory (resolve of %lux%lu)", (unsigned long)src.width,
+                                (unsigned long)src.height);
+        d->stretch_resolve = rs;
+    }
+    resolve(d, src, rs, 0, 0);
+    return rs;
+}
+
 static void begin_pass(D3DDevice *d)
 {
     MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor renderPassDescriptor];
@@ -569,6 +732,20 @@ static void begin_pass(D3DDevice *d)
     {
         D3DSurface *s = d3d_surf(d->ds);
         id<MTLTexture> t = attach_texture(s, false, &slice, &level);
+        if (t.sampleCount == 1 && samples > 1 && d3d_surf(d->rt[0])->forced_ms && s->ctex == nil)
+        {
+            /* Port MSAA: the multisampled twin of the depth-stencil surface.
+               It needs the content of the single-sample storage unless the
+               pass clears depth and stencil. */
+            t = ds_twin(d, s, samples);
+            if (s->twin_state == 2 && !(d->clear_depth && (d->clear_stencil || !s->f->stencil))) single_to_twin(d, s);
+            s->twin_state = 1;
+        }
+        else if (s->ms_twin != nil)
+        {
+            if (s->twin_state == 1) twin_to_single(d, s);
+            s->twin_state = 2;
+        }
         if (t.sampleCount != samples)
         {
             /* Direct3D 9 draws with a depth-stencil surface whose sample
@@ -905,17 +1082,19 @@ static id<MTLFunction> vs_function(D3DDevice *d, D3DShader *vs)
 }
 
 static id<MTLFunction> ps_function(D3DDevice *d, D3DShader *ps, D3DShader *vs, uint16_t dmask, uint16_t sm1_tex,
-                                   uint16_t as_2d, const d3dsh_unorm *u)
+                                   uint16_t as_2d, uint32_t port, const d3dsh_unorm *u)
 {
     @synchronized(ps)
     {
-    NSString *key = [NSString stringWithFormat:@"%x:%x:%x:%x:%x:%x:%x:%x:%x:%x:%x:%x", vs->id, sm1_tex, dmask, as_2d,
-                                               u->clamp, u->blend, u->src, u->dst, u->op, u->src_a, u->dst_a, u->op_a];
+    NSString *key = [NSString stringWithFormat:@"%x:%x:%x:%x:%x:%x:%x:%x:%x:%x:%x:%x:%x", vs->id, sm1_tex, dmask, as_2d,
+                                               port, u->clamp, u->blend, u->src, u->dst, u->op, u->src_a, u->dst_a,
+                                               u->op_a];
     id<MTLFunction> f = ps->ps_funcs[key];
     d3dsh_text t = { 0 };
     char err[256];
     if (f != nil) return f;
-    if (!d3d_shader_msl_ps(&ps->sh, vs->sh.outputs, vs->sh.noutputs, dmask, sm1_tex, as_2d, u, &t, err, sizeof err))
+    if (!d3d_shader_msl_ps(&ps->sh, vs->sh.outputs, vs->sh.noutputs, dmask, sm1_tex, as_2d, port, u, &t, err,
+                           sizeof err))
         rt_fatal("D3D9: pixel shader translation failed: %s", err);
     @autoreleasepool
     {
@@ -942,6 +1121,7 @@ typedef struct pipe_key {
     uint32_t depth_compare;
     uint32_t sm1_tex; /* ps_1_x texture variant (d3d_shader_msl_ps), 0 for later shader models */
     uint32_t as_2d;   /* samplers that sample a bound 2D texture (d3d_shader_msl_ps) */
+    uint32_t port;    /* the port's image quality variant (d3d_shader_msl_ps, port_variant) */
     uint32_t clear_flags, clear_mask;
     uint32_t promoted; /* bit n: color attachment n is an 8-bit target in 32-bit float storage (D3DCONV_PROMOTED) */
 } pipe_key;
@@ -1481,7 +1661,7 @@ static bool prim_count(uint32_t type, uint32_t prims, MTLPrimitiveType *mt, uint
 static MTLVertexDescriptor *vertex_desc(D3DDevice *d, const D3DShader *vs, const D3DDecl *dc, const pipe_key *k);
 
 #define PCACHE_MAGIC 0x50434331u /* "1CCP" */
-#define PCACHE_VERSION 4u
+#define PCACHE_VERSION 5u
 #define PCACHE_MAX 16384u        /* recipes; about 11 MiB */
 #define PCACHE_THREADS 3
 
@@ -1640,7 +1820,8 @@ static void pc_build(D3DDevice *d, D3DShader *vs, D3DShader *ps, D3DDecl *dc, pi
         MTLRenderPipelineDescriptor *pd = [MTLRenderPipelineDescriptor new];
         pd.vertexFunction = vs_function(d, vs);
         d3dsh_unorm u = unorm_of(&k);
-        pd.fragmentFunction = ps_function(d, ps, vs, (uint16_t)k.depth_compare, (uint16_t)k.sm1_tex, (uint16_t)k.as_2d, &u);
+        pd.fragmentFunction =
+            ps_function(d, ps, vs, (uint16_t)k.depth_compare, (uint16_t)k.sm1_tex, (uint16_t)k.as_2d, k.port, &u);
         pd.vertexDescriptor = vertex_desc(d, vs, dc, &k);
         set_attachments(pd, &k);
         p = [d->mtl newRenderPipelineStateWithDescriptor:pd error:&err];
@@ -1851,6 +2032,55 @@ static uint32_t ps_sampler_type(const D3DShader *ps, uint16_t sm1_tex, uint16_t 
     }
 }
 
+/* The port's image quality variant of a draw (d3d_shader_msl_ps, port).
+   The game's shaders are found by the first 8 bytes of their hash (the
+   SHA-256 of the tokens, D3DShader.hash), from a frame trace of a level
+   (2026-11-23):
+     66f892f9c13576d8  the screen-space shadow projection: s0 the scene
+                       depth, s1 the shadow map (linear depth, 1024 x 1024
+                       G16R16F), one comparison with an exponential falloff.
+                       Soft shadows (RT_GFX_SOFT_SHADOWS): the filtered
+                       lookup on s1, radius PCF_RADIUS_TEXELS texels.
+     089e1e3aa4992cbb  the background G-buffer shader: s3 the painted
+                       background tile (1024 x 1024 DXT1) at v0.xy, then the
+                       color grading LUTs. Sharper backgrounds
+                       (RT_GFX_SHARP_BACKGROUNDS): EASU magnification on s3.
+   A variant applies only when its sampler has a bound 2D texture. */
+#define PCF_RADIUS_TEXELS 1.5f
+static const uint8_t shadow_ps_hash[8] = { 0x66, 0xf8, 0x92, 0xf9, 0xc1, 0x35, 0x76, 0xd8 };
+static const uint8_t background_ps_hash[8] = { 0x08, 0x9e, 0x1e, 0x3a, 0xa4, 0x99, 0x2c, 0xbb };
+
+static bool port_sampler_ok(D3DDevice *d, const D3DShader *ps, uint16_t as_2d, uint32_t s)
+{
+    return s < D3D_PS_SAMPLERS && ps->sh.version >= 0x200 && d->tex[s] != NULL &&
+           ps_sampler_type(ps, 0, as_2d, s) == D3DSTT_2D && !d3d_tex(d->tex[s])->cube &&
+           !d3d_tex(d->tex[s])->volume && !d3d_tex(d->tex[s])->f->depth && d3d_tex(d->tex[s])->width > 0;
+}
+
+static uint32_t port_variant(D3DDevice *d, const D3DShader *ps, uint16_t as_2d)
+{
+    static bool pcf_logged, easu_logged; /* render thread only */
+    if (memcmp(ps->hash, shadow_ps_hash, sizeof shadow_ps_hash) == 0)
+    {
+        if (rt_portgfx_get(RT_GFX_SOFT_SHADOWS) == 0 || !port_sampler_ok(d, ps, as_2d, 1)) return 0;
+        if (!pcf_logged)
+            rt_log("D3D9: soft shadows: %d-tap filtered lookup in shader %u, shadow map %u x %u", D3DSH_PCF_TAPS,
+                   ps->id, d3d_tex(d->tex[1])->width, d3d_tex(d->tex[1])->height);
+        pcf_logged = true;
+        return 1u + 1u;
+    }
+    if (memcmp(ps->hash, background_ps_hash, sizeof background_ps_hash) == 0)
+    {
+        if (rt_portgfx_get(RT_GFX_SHARP_BACKGROUNDS) == 0 || !port_sampler_ok(d, ps, as_2d, 3)) return 0;
+        if (!easu_logged)
+            rt_log("D3D9: sharper backgrounds: EASU magnification in shader %u, tile %u x %u", ps->id,
+                   d3d_tex(d->tex[3])->width, d3d_tex(d->tex[3])->height);
+        easu_logged = true;
+        return (1u + 3u) << 8;
+    }
+    return 0;
+}
+
 static void check_states(D3DDevice *d, const D3DShader *ps, bool points)
 {
     uint32_t i;
@@ -2028,6 +2258,7 @@ static void bind_constants(D3DDevice *d, const D3DShader *sh, bool ps)
     }
 }
 
+
 /* Encode one draw. Returns D3D_OK or an error for invalid calls. */
 static uint32_t do_draw(D3DDevice *d, draw_info *di)
 {
@@ -2040,6 +2271,7 @@ static uint32_t do_draw(D3DDevice *d, draw_info *di)
     MTLPrimitiveType mt;
     uint32_t n, s, e, i, instances = 1;
     uint16_t dmask = 0, sm1_tex, as_2d;
+    uint32_t port;
     MTLRenderPipelineDescriptor *pd;
     MTLViewport vp;
     float vs_misc[20], ps_misc[20]; /* buffer 19: float4[5] (rt_d3d9_shader.h) */
@@ -2069,6 +2301,7 @@ static uint32_t do_draw(D3DDevice *d, draw_info *di)
         rt_fatal("D3D9: point lists need a vertex shader that writes the point size");
     sm1_tex = sm1_variant(d, ps);
     as_2d = as_2d_variant(d, ps);
+    port = port_variant(d, ps, as_2d);
     for (s = 0; s < D3D_PS_SAMPLERS; s++)
         if ((ps->sh.sampler_type[s] == D3DSTT_2D || (as_2d & (1u << s))) && d->tex[s] != NULL &&
             d3d_tex(d->tex[s])->f->depth)
@@ -2131,6 +2364,7 @@ static uint32_t do_draw(D3DDevice *d, draw_info *di)
     k.depth_compare = dmask;
     k.sm1_tex = sm1_tex;
     k.as_2d = as_2d;
+    k.port = port;
     {
         id<MTLRenderPipelineState> p = state_cache_get(d->pipelines, &k);
         if (p == nil && (p = pcache_take(&k)) != nil) state_cache_put(d->pipelines, &k, p);
@@ -2139,7 +2373,7 @@ static uint32_t do_draw(D3DDevice *d, draw_info *di)
             pd = [MTLRenderPipelineDescriptor new];
             pd.vertexFunction = vs_function(d, vs);
             d3dsh_unorm u = unorm_of(&k);
-            pd.fragmentFunction = ps_function(d, ps, vs, dmask, sm1_tex, as_2d, &u);
+            pd.fragmentFunction = ps_function(d, ps, vs, dmask, sm1_tex, as_2d, port, &u);
             pd.vertexDescriptor = vertex_desc(d, vs, dc, &k);
             p = make_pipeline(d, &k, pd);
             pcache_record(&k, vs, ps, dc);
@@ -2243,6 +2477,8 @@ static uint32_t do_draw(D3DDevice *d, draw_info *di)
     ps_misc[1] = (float)(d->rs[RS_ALPHAREF] & 0xFFu) / 255.0f;
     ps_misc[2] = 1.0f / (float)d->pass_scale; /* VPOS: Metal to D3D pixels */
     ps_misc[3] = 0.0f;
+    if (port & 0x1Fu)
+        ps_misc[3] = PCF_RADIUS_TEXELS / (float)d3d_tex(d->tex[(port & 0x1Fu) - 1u])->width;
     for (s = 0; s < 16; s++) ps_misc[4 + s] = d3d_f(d->ss[s][SS_MIPMAPLODBIAS]);
     if (!d->es_valid || memcmp(d->es_ps_misc, ps_misc, sizeof ps_misc) != 0)
     {
@@ -3022,10 +3258,76 @@ static id<MTLTexture> fx_upscale(D3DDevice *d, id<MTLTexture> src, NSUInteger w,
     return d->fx_out;
 }
 
+/* Frame pacing when the game uses VSync (presentation interval ONE): each
+   frame stays on the screen for the same number of refresh intervals k.
+   Without pacing, a game that cannot keep the refresh rate of the screen
+   (120 Hz on ProMotion) shows frames for 1 and 2 intervals in turn, which
+   makes motion uneven. k is the smallest number of intervals that holds
+   the smoothed time of a frame: the larger of the CPU time of the game
+   between two Present calls (start: the time when Present starts) and the
+   GPU time of the frame. k becomes larger at once and smaller after
+   PACE_FAST_FRAMES frames that fit in k - 1 intervals with a margin. k is
+   at most the number of intervals in 1/30 second.
+   Returns the minimum display time of the previous frame for
+   presentDrawable:afterMinimumDuration:, or 0 for a plain present (k = 1,
+   VSync off, or a window that is on no display). */
+#define PACE_FAST_FRAMES 60u
+static double pace_interval(D3DDevice *d, double start)
+{
+    uint32_t hw = d->pp[PP_HWND] != 0 ? d->pp[PP_HWND] : d->focus_hwnd, need, kmax, old = d->pace_k;
+    double gpu = (double)atomic_exchange(&d->gpu_ns, 0) * 1e-9, cpu, cost, refresh;
+    rt_rect r;
+    if (d->pp[PP_INTERVAL] == D3DPRESENT_INTERVAL_IMMEDIATE || rt_cocoa_headless())
+    {
+        d->pace_k = 0;
+        d->pace_cost = 0.0;
+        return 0.0;
+    }
+    r = rt_user32_screen_rect(hw);
+    refresh = rt_cocoa_refresh_interval_at(r.left + (r.right - r.left) / 2, r.top + (r.bottom - r.top) / 2);
+    if (refresh <= 0.0) return 0.0;
+    cpu = d->pace_return > 0.0 ? start - d->pace_return : 0.0;
+    cost = cpu > gpu ? cpu : gpu;
+    /* A frame after a long stop (a load) does not change the pacing. */
+    if (cost < 0.25) d->pace_cost = d->pace_cost == 0.0 ? cost : d->pace_cost * 0.9 + cost * 0.1;
+    kmax = (uint32_t)floor((1.0 / 30.0) / refresh + 1e-6);
+    if (kmax < 1) kmax = 1;
+    need = (uint32_t)ceil(d->pace_cost * 1.05 / refresh);
+    if (need < 1) need = 1;
+    if (need > kmax) need = kmax;
+    if (d->pace_k == 0 || need > d->pace_k)
+    {
+        d->pace_k = need;
+        d->pace_fast = 0;
+    }
+    else if (need < d->pace_k && d->pace_cost * 1.15 < (double)(d->pace_k - 1) * refresh)
+    {
+        if (++d->pace_fast >= PACE_FAST_FRAMES)
+        {
+            d->pace_k--;
+            d->pace_fast = 0;
+        }
+    }
+    else
+        d->pace_fast = 0;
+    if (d->pace_k != old && d->pace_logs < 16)
+    {
+        d->pace_logs++;
+        rt_log("D3D9: frame pacing: %.1f frames per second (%u of %.1f Hz; frame time %.1f ms)%s",
+               1.0 / ((double)d->pace_k * refresh), d->pace_k, 1.0 / refresh, d->pace_cost * 1000.0,
+               d->pace_logs == 16 ? "; later changes are not logged" : "");
+    }
+    /* The previous frame stays on the screen for at least k - 1/2
+       intervals: the next refresh after that time is k intervals after it
+       was shown. */
+    return d->pace_k > 1 ? ((double)d->pace_k - 0.5) * refresh : 0.0;
+}
+
 void d3d_present(D3DDevice *d)
 {
     @autoreleasepool
     {
+        double start = mono_seconds(), pace;
         D3DSurface *bb = d3d_surf(d->backbuffer);
         id<MTLTexture> src = bb->tex;
         CGSize bounds, size;
@@ -3152,7 +3454,11 @@ void d3d_present(D3DDevice *d)
             [e setFragmentBuffer:d->gt7_inv offset:0 atIndex:1];
             [e drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
             [e endEncoding];
-            [d->cb presentDrawable:dr];
+            pace = pace_interval(d, start);
+            if (pace > 0.0)
+                [d->cb presentDrawable:dr afterMinimumDuration:pace];
+            else
+                [d->cb presentDrawable:dr];
             if (d->present_count == 0 || !d->presented)
             {
                 rt_log("D3D9: first frame presented: back buffer %ux%u, drawable %gx%g pixels", bb->width, bb->height,
@@ -3191,6 +3497,7 @@ void d3d_present(D3DDevice *d)
 #if RT_DEV_BUILD
         perf_frame();
 #endif
+        d->pace_return = mono_seconds();
     }
 }
 

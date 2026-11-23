@@ -5,7 +5,8 @@
 #
 # tools/port_graphics/PortGraphics.cs adds rows for the graphics settings of
 # the port (runtime/src/rt_portgfx.c) to the Graphics page of the game's
-# options window. The player loads the assembly into the Unity child domain
+# options window. tools/port_graphics/PortController.cs is the game
+# controller layer (commands, radial ability menu). The player loads the assembly into the Unity child domain
 # and calls PortGraphics.GraphicsOptions.Tick after each frame
 # (rt_mono_port_tick, runtime/src/rt_mono.c).
 #
@@ -17,7 +18,7 @@
 #   3. The game directory is the parent directory of the port directory.
 #
 # Steps:
-#   1. Compile tools/port_graphics/PortGraphics.cs against the assemblies of
+#   1. Compile tools/port_graphics/PortGraphics.cs and PortController.cs against the assemblies of
 #      PillarsOfEternity_data/Managed to work/aot/user/aot/PortGraphics.dll
 #      (guest path C:\Users\Player\aot\PortGraphics.dll).
 #   2. Compile the assembly with the Mono full-AOT compiler, with the options
@@ -71,7 +72,8 @@ for f in "$MANAGED"/*.dll; do
     printf '"-r:%s"\n' "$f" >> "$TOOLS/port_graphics.rsp"
 done
 "$DOTNET_DIR/dotnet" "$csc" -nologo -noconfig -nostdlib -target:library -optimize+ -warnaserror+ \
-    @"$TOOLS/port_graphics.rsp" -out:"$AOT_DIR/$ASSEMBLY" "$PORT_DIR/tools/port_graphics/PortGraphics.cs"
+    @"$TOOLS/port_graphics.rsp" -out:"$AOT_DIR/$ASSEMBLY" "$PORT_DIR/tools/port_graphics/PortGraphics.cs" \
+    "$PORT_DIR/tools/port_graphics/PortController.cs"
 
 echo "PROGRESS AOT-compile $ASSEMBLY"
 rm -f "$AOT_DIR/$IMAGE.s"
