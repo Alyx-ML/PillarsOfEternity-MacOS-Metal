@@ -47,7 +47,7 @@ MODULE_LIST="$PORT_DIR/tools/aot_modules.txt"
 ZIP="$OUT/PillarsOfEternity-Mac-ARM64.zip"
 # The version of the release (CFBundleShortVersionString). The launcher
 # compares it with the tag of the latest GitHub release (rt_launcher.m).
-VERSION=0.2
+VERSION=0.3
 # The minimum macOS version of the application. The converter tools of
 # Homebrew (LLVM, lld) need macOS 27.2; tools/build_toolchain.sh builds SRW
 # and llasm for the same version.
@@ -58,7 +58,7 @@ die() {
     exit 1
 }
 
-for f in "$LLVM/opt" "$LLVM/llvm-split" "$LLVM/llvm-link" "$LLVM/clang-23" "$LLVM/llvm-ar" "$LLVM/llvm-nm" \
+for f in "$LLVM/llvm-split" "$LLVM/llvm-link" "$LLVM/clang-23" "$LLVM/llvm-ar" "$LLVM/llvm-nm" \
     "$LLD_PREFIX/bin/lld" "$MODULE_LIST" "$PORT_DIR/work/aot/user/aot/PortAotInstances.dll" \
     "$PORT_DIR/work/aot/user/aot/PortGraphics.dll"; do
     [ -f "$f" ] || die "$f does not exist"
@@ -220,7 +220,6 @@ set_rpath() {
 echo "PROGRESS copy the converter tools"
 cp "$OUT/toolchain/srw/SRW" "$REC/bin/SRW"
 cp "$OUT/toolchain/llasm/llasm" "$REC/bin/llasm"
-cp -L "$LLVM/opt" "$REC/bin/opt"
 cp -L "$LLVM/llvm-split" "$REC/bin/llvm-split"
 cp -L "$LLVM/llvm-link" "$REC/bin/llvm-link"
 cp -L "$LLVM/clang-23" "$REC/bin/clang"

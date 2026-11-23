@@ -164,7 +164,7 @@ static uint32_t open_guest(uint32_t g, bool wide, pe_file *f)
     if (fstat(f->fd, &st) != 0) rt_fatal("version: fstat failed: %s", strerror(errno));
     if (!S_ISREG(st.st_mode))
     {
-        if (close(f->fd) != 0) rt_log("version: close failed: %s", strerror(errno));
+        (void)(close(f->fd) != 0);
         return S_ISDIR(st.st_mode) ? ERROR_ACCESS_DENIED : ERROR_BAD_FORMAT;
     }
     f->size = (uint64_t)st.st_size;
@@ -240,7 +240,7 @@ static void version_info_size(_cpu *cpu, bool wide)
     if (e == 0)
     {
         e = find_version(&f, &off, &size);
-        if (close(f.fd) != 0) rt_log("GetFileVersionInfoSizeW: close failed: %s", strerror(errno));
+        (void)(close(f.fd) != 0);
     }
     if (e != 0)
     {
@@ -279,7 +279,7 @@ static void version_info(_cpu *cpu, bool wide)
             if (buf == NULL) rt_fatal("out of host memory (version resource)");
             if (!pe_read(&f, off, buf, n)) e = ERROR_BAD_FORMAT;
         }
-        if (close(f.fd) != 0) rt_log("GetFileVersionInfoW: close failed: %s", strerror(errno));
+        (void)(close(f.fd) != 0);
     }
     if (e != 0)
     {

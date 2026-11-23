@@ -155,7 +155,6 @@ void rt_ReportEventA(_cpu *cpu)
         len += (size_t)snprintf(line + len, cap - len, ", data (%u bytes):", dsize);
         for (i = 0; i < shown; i++) len += (size_t)snprintf(line + len, cap - len, " %02x", rd8(data + i));
     }
-    rt_log("%s", line);
     free(line);
     rt_object_unref(o);
     RET(1);

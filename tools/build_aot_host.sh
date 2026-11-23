@@ -97,10 +97,14 @@ if [ $PLAYER -eq 1 ]; then
     ROOT="$PORT_DIR/build/player"
     OUT="$ROOT/PillarsOfEternity"
     HOST_MAIN=player_main
+    # No local symbols in the player (about 110 MB of loc_ names of the
+    # translated code); runtime/loader/rt_convert.c links the same way.
+    STRIP_LOCALS=-Wl,-x
 else
     ROOT="$PORT_DIR/build/aot"
     OUT="$ROOT/mono-aot"
     HOST_MAIN=aot_main
+    STRIP_LOCALS=
 fi
 OBJ="$ROOT/obj"
 IMAGES="$ROOT/images"
@@ -255,7 +259,7 @@ if [ $PLAYER -eq 1 ]; then
     set -- "$@" -Wl,-rename_section,__DATA,__data,__XDATA,__data -Wl,-rename_section,__DATA,__bss,__XDATA,__bss \
         -Wl,-rename_section,__DATA_CONST,__const,__XDATA,__const -Wl,-segaddr,__XDATA,0x12FE00000
 fi
-"$LLVM/clang" -target $TRIPLE "$@" -Wl,-segaddr,__GUEST,0x10FD00000 \
+"$LLVM/clang" -target $TRIPLE "$@" $STRIP_LOCALS -Wl,-segaddr,__GUEST,0x10FD00000 \
     -framework CoreFoundation -framework CoreServices -framework Security -framework CFNetwork \
     -framework IOKit -framework AppKit -framework Carbon -framework Metal -framework QuartzCore \
     -framework CoreGraphics -framework CoreText -framework ImageIO -framework AudioToolbox -framework MetalFX \

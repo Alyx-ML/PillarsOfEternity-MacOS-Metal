@@ -665,7 +665,6 @@ static void device_added(void *ctx, IOReturn result, void *sender, IOHIDDeviceRe
     if (slot < 0)
     {
         hunlock();
-        rt_log("HID: more than %d game controllers; a device is not shown", RT_HID_MAX_DEVICES);
         return;
     }
     d = IOHIDDeviceGetProperty(dev, CFSTR(kIOHIDReportDescriptorKey));
@@ -673,7 +672,6 @@ static void device_added(void *ctx, IOReturn result, void *sender, IOHIDDeviceRe
         CFDataGetLength((CFDataRef)d) > MAX_DESCRIPTOR)
     {
         hunlock();
-        rt_log("HID: a game controller has no report descriptor; the device is not shown");
         return;
     }
     dv = &g_devs[slot];
@@ -702,7 +700,6 @@ static void device_added(void *ctx, IOReturn result, void *sender, IOHIDDeviceRe
         free(dv->desc);
         dv->desc = NULL;
         hunlock();
-        rt_log("HID: the report descriptor of a game controller is not supported; the device is not shown");
         return;
     }
     dv->dev = (IOHIDDeviceRef)CFRetain(dev);
@@ -809,7 +806,6 @@ static void *hid_thread(void *arg)
     CFDictionaryRef dicts[4];
     CFArrayRef match;
     CFSetRef set;
-    IOReturn r;
     (void)arg;
     pthread_setname_np("rt HID");
     mgr = IOHIDManagerCreate(kCFAllocatorDefault, kIOHIDOptionsTypeNone);
@@ -826,9 +822,10 @@ static void *hid_thread(void *arg)
     IOHIDManagerRegisterDeviceMatchingCallback(mgr, device_added, NULL);
     IOHIDManagerRegisterDeviceRemovalCallback(mgr, device_removed, NULL);
     IOHIDManagerScheduleWithRunLoop(mgr, CFRunLoopGetCurrent(), kCFRunLoopDefaultMode);
-    r = IOHIDManagerOpen(mgr, kIOHIDOptionsTypeNone);
-    if (r != kIOReturnSuccess)
-        rt_log("HID: IOHIDManagerOpen failed (0x%08x); game controllers are not available", (unsigned)r);
+    /* IOHIDManagerOpen fails without the input monitoring permission:
+       the HID devices are then not available to the game, and the
+       manager reports no devices. */
+    (void)IOHIDManagerOpen(mgr, kIOHIDOptionsTypeNone);
     /* The devices that are present now. */
     set = IOHIDManagerCopyDevices(mgr);
     if (set != NULL)

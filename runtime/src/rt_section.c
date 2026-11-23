@@ -54,7 +54,7 @@ static void section_destroy(rt_object *o)
 {
     section *s = o->data;
     if (s == NULL) return;
-    if (s->fd >= 0 && close(s->fd) != 0) rt_log("file mapping: close failed: %s", strerror(errno));
+    (void)(s->fd >= 0 && close(s->fd) != 0);
     if (s->shared != NULL && munmap(s->shared, s->shared_len) != 0) rt_fatal("file mapping: munmap failed: %s", strerror(errno));
     free(s);
 }

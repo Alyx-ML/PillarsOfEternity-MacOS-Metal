@@ -250,12 +250,11 @@ void rt_WaitForInputIdle(_cpu *cpu)
 
 /* ---------------------------------------------------------------- new processes */
 
-static void refuse_process(const char *fn, uint32_t app, uint32_t cmd, bool wide)
+static void refuse_process(uint32_t app, uint32_t cmd, bool wide)
 {
     char a[RT_PATH_BYTES] = "", c[2048] = "";
     if (app != 0) (void)(wide ? rt_gstr_w(a, sizeof(a), app) : rt_gstr_a(a, sizeof(a), app));
     if (cmd != 0) (void)(wide ? rt_gstr_w(c, sizeof(c), cmd) : rt_gstr_a(c, sizeof(c), cmd));
-    rt_log("%s: other programs cannot run (application \"%s\", command line \"%s\")", fn, a, c);
     rt_set_last_error(ERROR_NOT_SUPPORTED);
 }
 
@@ -263,13 +262,13 @@ static void refuse_process(const char *fn, uint32_t app, uint32_t cmd, bool wide
    startup, process_information) */
 void rt_CreateProcessA(_cpu *cpu)
 {
-    refuse_process("CreateProcessA", ARG(0), ARG(1), false);
+    refuse_process(ARG(0), ARG(1), false);
     RET(0);
 }
 
 void rt_CreateProcessW(_cpu *cpu)
 {
-    refuse_process("CreateProcessW", ARG(0), ARG(1), true);
+    refuse_process(ARG(0), ARG(1), true);
     RET(0);
 }
 
@@ -277,7 +276,7 @@ void rt_CreateProcessW(_cpu *cpu)
    cmd, flags, env, dir, startup, process_information) */
 void rt_CreateProcessWithLogonW(_cpu *cpu)
 {
-    refuse_process("CreateProcessWithLogonW", ARG(4), ARG(5), true);
+    refuse_process(ARG(4), ARG(5), true);
     RET(0);
 }
 
@@ -297,7 +296,6 @@ static bool has_prefix_nocase(const char *s, const char *p)
 static bool open_url(CFURLRef url)
 {
     OSStatus st = LSOpenCFURLRef(url, NULL);
-    if (st != noErr) rt_log("ShellExecute: Launch Services error %d", (int)st);
     return st == noErr;
 }
 
@@ -307,7 +305,7 @@ static bool open_url(CFURLRef url)
    application. Other verbs and parameters fail with ERROR_NO_ASSOCIATION.
    Returns the hInstApp value: 33 for success, else an SE_ERR code (the
    last error is then set). */
-static uint32_t shell_open(const char *fn, uint32_t verb, uint32_t file, uint32_t params)
+static uint32_t shell_open(uint32_t verb, uint32_t file, uint32_t params)
 {
     char v[64] = "", f[2048], p[16] = "";
     CFURLRef url = NULL;
@@ -322,7 +320,6 @@ static uint32_t shell_open(const char *fn, uint32_t verb, uint32_t file, uint32_
     }
     if ((v[0] != 0 && strcasecmp(v, "open") != 0 && strcasecmp(v, "explore") != 0) || p[0] != 0)
     {
-        rt_log("%s: verb \"%s\" with parameters for \"%s\" is not supported", fn, v, f);
         rt_set_last_error(ERROR_NO_ASSOCIATION);
         return SE_ERR_NOASSOC;
     }
@@ -373,7 +370,7 @@ void rt_ShellExecuteExW(_cpu *cpu)
     }
     mask = rd32(info + 4);
     if (mask & SEE_MASK_NOCLOSEPROCESS) wr32(info + 56, 0);
-    r = shell_open("ShellExecuteExW", rd32(info + 12), rd32(info + 16), rd32(info + 20));
+    r = shell_open(rd32(info + 12), rd32(info + 16), rd32(info + 20));
     wr32(info + 32, r); /* hInstApp: > 32 for success */
     RET(r > 32u ? 1u : 0u);
 }
@@ -383,5 +380,5 @@ void rt_ShellExecuteExW(_cpu *cpu)
    32 for success, else an SE_ERR code. */
 void rt_ShellExecuteW(_cpu *cpu)
 {
-    RET(shell_open("ShellExecuteW", ARG(1), ARG(2), ARG(3)));
+    RET(shell_open(ARG(1), ARG(2), ARG(3)));
 }

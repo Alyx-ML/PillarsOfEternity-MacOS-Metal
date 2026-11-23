@@ -194,7 +194,6 @@ static void capture_setup(const char *work)
         rt_fatal("RT_CAPTURE: path too long");
     if (mkdir(dir, 0755) != 0) rt_fatal("RT_CAPTURE: %s could not be made: %s", dir, strerror(errno));
     rt_d3d9_capture_init(dir, (unsigned)s);
-    rt_log("frame capture: %s, one frame each %lu s", dir, s);
 }
 
 int main(int argc, char **argv)

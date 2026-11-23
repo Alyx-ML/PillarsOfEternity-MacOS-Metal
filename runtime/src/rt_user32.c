@@ -593,7 +593,6 @@ static void post_input(const qmsg *m, uint32_t bits)
     ok = ring_push(&q->input, m, false);
     if (ok) queue_signal(q, bits);
     unlock();
-    if (!ok) rt_log("USER32: the input queue is full (%u messages); input message 0x%04x was discarded", QUEUE_LIMIT, m->msg);
 }
 
 /* Run fn(cpu, ctx) on the main thread at its next message check (other
@@ -2229,7 +2228,6 @@ static bool show_window(_cpu *cpu, uint32_t hwnd, int cmd)
         if (top) r = work_area_for(r);
         break;
     case SW_SHOWMINIMIZED: case SW_MINIMIZE: case SW_SHOWMINNOACTIVE: case SW_FORCEMINIMIZE:
-        if (top && !(style & WS_MINIMIZE)) rt_log("USER32: ShowWindow(0x%08x, %d): the program minimizes the window", hwnd, cmd);
         show = true;
         activate = cmd == SW_SHOWMINIMIZED;
         new_style = (new_style & ~WS_MAXIMIZE) | WS_MINIMIZE;
@@ -3581,7 +3579,6 @@ static void apply_minimized(_cpu *cpu, uint32_t hwnd, bool minimized)
     }
     if (minimized)
     {
-        rt_log("USER32: window 0x%08x was minimized in macOS (the Dock or the title bar)", hwnd);
         if (!(w->style & WS_MAXIMIZE)) w->restore = w->wrect;
         w->style |= WS_MINIMIZE;
     }
@@ -3622,7 +3619,6 @@ static void restore_last_active(void)
         restore = true;
     unlock();
     if (!restore) return;
-    rt_log("USER32: the application is active again; window 0x%08x is minimized and gets SC_RESTORE", hwnd);
     send0(hwnd, WM_SYSCOMMAND, SC_RESTORE, 0);
 }
 
@@ -4136,7 +4132,6 @@ static bool translate(const qmsg *msg)
     }
     if (ok) queue_signal(q, QS_POSTMESSAGE | QS_ALLPOSTMESSAGE);
     unlock();
-    if (!ok) rt_log("USER32: the message queue is full; TranslateMessage discarded characters");
     return true;
 }
 
@@ -4430,16 +4425,7 @@ static void key_input(bool down, bool is_repeat, uint16_t code, const uint16_t *
     qmsg m;
     uint32_t side, prev, lp, target;
     bool sys;
-    if (code >= 128 || keys[code].vk == 0)
-    {
-        static bool logged[256];
-        if (!logged[code & 0xFFu])
-        {
-            logged[code & 0xFFu] = true;
-            rt_log("USER32: macOS key code 0x%02x has no Windows key; the key is ignored", code);
-        }
-        return;
-    }
+    if (code >= 128 || keys[code].vk == 0) return;
     k = &keys[code];
     rt_rawinput_key(k->vk, k->scan, k->ext != 0, down);
     side = side_vk(k);
@@ -4478,7 +4464,6 @@ static void key_input(bool down, bool is_repeat, uint16_t code, const uint16_t *
         int i, n = nchars;
         if (n > (int)(sizeof m.chars / sizeof m.chars[0]))
         {
-            rt_log("USER32: a key gives %d characters; the first %d are used", n, (int)(sizeof m.chars / sizeof m.chars[0]));
             n = (int)(sizeof m.chars / sizeof m.chars[0]);
         }
         for (i = 0; i < n; i++) m.chars[i] = chars[i];
@@ -5024,6 +5009,26 @@ void rt_user32_pad_move(int32_t dx, int32_t dy)
     rt_user32_on_mouse(hwnd, WM_MOUSEMOVE, nx, ny, 0);
 }
 
+void rt_user32_pad_warp(int32_t px, int32_t py, int32_t sw, int32_t sh)
+{
+    uint32_t hwnd;
+    int32_t x, y, ox, oy, w, h, nx, ny;
+    if (sw <= 0 || sh <= 0) rt_fatal("rt_user32_pad_warp: the frame size %dx%d", sw, sh);
+    if (!pad_target(&hwnd, &x, &y, &ox, &oy, &w, &h)) return;
+    /* The game's frame can differ from the client area (a frame size that
+       the window rounds): scale. */
+    nx = (int32_t)((int64_t)px * w / sw);
+    ny = (int32_t)((int64_t)py * h / sh);
+    if (nx < 0) nx = 0;
+    if (ny < 0) ny = 0;
+    if (nx >= w) nx = w - 1;
+    if (ny >= h) ny = h - 1;
+    if (nx == x && ny == y) return;
+    rt_cocoa_cursor_move(ox + nx, oy + ny);
+    rt_user32_on_mouse_motion((double)(nx - x), (double)(ny - y));
+    rt_user32_on_mouse(hwnd, WM_MOUSEMOVE, nx, ny, 0);
+}
+
 void rt_user32_pad_button(int button, bool down)
 {
     static const uint32_t msgs[3][2] = { { WM_LBUTTONUP, WM_LBUTTONDOWN }, { WM_RBUTTONUP, WM_RBUTTONDOWN },
@@ -5144,14 +5149,11 @@ static int script_char_key(char c)
 static void script_run(void *ctx)
 {
     const script_ev *e = ctx;
-    static const char *const names[] = { "move", "down", "up", "rdown", "rup", "keydown", "keyup", "appinactive",
-                                         "appactive", "deminiaturize" };
     uint32_t hwnd = rt_user32_raw_target();
     if (e->kind == SEV_DEMINIATURIZE)
     {
         /* windowDidDeminiaturize: the user restored the window from the
            Dock. */
-        rt_log("input script: %.2f s line %u deminiaturize window 0x%08x", e->t, e->line, e->hwnd);
         if (!rt_user32_is_window(e->hwnd)) rt_fatal("input script line %u: 0x%08x is not a window", e->line, e->hwnd);
         rt_user32_on_minimized(e->hwnd, false);
         return;
@@ -5159,7 +5161,6 @@ static void script_run(void *ctx)
     if (e->kind == SEV_APP_INACTIVE || e->kind == SEV_APP_ACTIVE)
     {
         /* An inactive application has no active window. */
-        rt_log("input script: %.2f s line %u %s (window 0x%08x)", e->t, e->line, names[e->kind], hwnd);
         if (e->kind == SEV_APP_INACTIVE)
         {
             /* The order of the Cocoa notifications when the user selects
@@ -5185,8 +5186,6 @@ static void script_run(void *ctx)
         return;
     }
     if (hwnd == 0) rt_fatal("input script line %u: the program has no active window", e->line);
-    rt_log("input script: %.2f s line %u %s %d %d 0x%02x (window 0x%08x)", e->t, e->line, names[e->kind], e->x, e->y,
-           e->code, hwnd);
     if (e->kind == SEV_KEYDOWN || e->kind == SEV_KEYUP)
     {
         rt_user32_on_key(hwnd, e->kind == SEV_KEYDOWN, false, e->code, e->kind == SEV_KEYDOWN && e->ch != 0 ? &e->ch : NULL,
@@ -5236,7 +5235,6 @@ static void *script_thread(void *arg)
         }
         dispatch_async_f(dispatch_get_main_queue(), &script_evs[i], script_run);
     }
-    rt_log("input script: all %zu events sent", script_n);
     return NULL;
 }
 
@@ -5354,7 +5352,6 @@ void rt_user32_input_script(const char *path)
         pthread_create(&th, &a, script_thread, NULL) != 0)
         rt_fatal("input script: the thread could not start");
     pthread_attr_destroy(&a);
-    rt_log("input script %s: %zu events", path, script_n);
 }
 
 /* ---------------------------------------------------------------- start-up */
@@ -5390,8 +5387,8 @@ void rt_user32_init(void)
 #define MB_HELP 0x00004000u
 
 /* Show a message box as a system alert (CFUserNotification), which works
-   on any thread. In headless mode the runtime shows no alert: it writes
-   the message to the log and stops the process. */
+   on any thread. In headless mode the runtime shows no alert: it stops the
+   process with the message (rt_fatal). */
 static uint32_t message_box(const char *fn, char *text, char *caption, uint32_t type)
 {
     static const struct { const char *label[3]; uint32_t id[3]; int n; } sets[7] = {
@@ -5411,7 +5408,6 @@ static uint32_t message_box(const char *fn, char *text, char *caption, uint32_t 
 
     if (set > 6) rt_fatal("%s: type 0x%x is not supported", fn, type);
     if (type & MB_HELP) rt_fatal("%s: MB_HELP is not supported", fn);
-    rt_log("%s: [%s] %s", fn, caption, text);
     if (atomic_load(&headless) || rt_cocoa_headless()) rt_fatal("%s in headless mode: [%s] %s", fn, caption, text);
 
     n = sets[set].n;

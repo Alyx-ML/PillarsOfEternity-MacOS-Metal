@@ -30,14 +30,6 @@ static void vlog(const char *prefix, const char *fmt, va_list ap)
     pthread_mutex_unlock(&log_lock);
 }
 
-void rt_log(const char *fmt, ...)
-{
-    va_list ap;
-    va_start(ap, fmt);
-    vlog("[rt] ", fmt, ap);
-    va_end(ap);
-}
-
 _Noreturn void rt_fatal(const char *fmt, ...)
 {
     va_list ap;

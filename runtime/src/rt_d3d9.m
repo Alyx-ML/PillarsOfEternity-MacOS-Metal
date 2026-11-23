@@ -148,7 +148,6 @@ void rt_Direct3DCreate9(_cpu *cpu)
     rt_com_object *o;
     if (ARG(0) != D3D_SDK_VERSION)
     {
-        rt_log("D3D9: Direct3DCreate9 with SDK version %u (the runtime supports %u)", ARG(0), D3D_SDK_VERSION);
         RET(0);
         return;
     }
@@ -538,8 +537,6 @@ static void new_command_buffer(D3DDevice *d)
                device: Present returns D3DERR_DEVICELOST until Reset. */
             atomic_store(&dev->lost, true);
             [dev->mips_lost addObjectsFromArray:mips];
-            rt_log("D3D9: a GPU restart that another process caused discarded command buffer %llu; the device is lost "
-                   "until Reset", (unsigned long long)serial);
         }
         atomic_store(&dev->completed, serial);
         if (pthread_cond_broadcast(&dev->done_cv) != 0) rt_fatal("D3D9: completion signal failed");
@@ -849,7 +846,6 @@ static uint32_t create_swap_surfaces(D3DDevice *d)
         bs->msaa = 0;
         bs->msaa_quality = 0;
         bs->forced_ms = true;
-        rt_log("D3D9: port MSAA: the back buffer has %u samples", forced);
     }
     if (pp[PP_AUTODS])
     {
@@ -913,8 +909,6 @@ void rt_com_Direct3D9_CreateDevice(_cpu *cpu)
             return;
         }
         d->layer = (__bridge CAMetalLayer *)layer;
-        rt_log("D3D9: CreateDevice for window 0x%08x: %ux%u, format 0x%x, %s, interval 0x%x", hwnd, d->pp[PP_WIDTH],
-               d->pp[PP_HEIGHT], d->pp[PP_FORMAT], d->pp[PP_WINDOWED] ? "windowed" : "full screen", d->pp[PP_INTERVAL]);
         d->mtl = rt_gpu_device();
         d->queue = [d->mtl newCommandQueue];
         if (d->queue == nil) rt_fatal("D3D9: command queue creation failed");
@@ -1179,12 +1173,9 @@ void rt_com_D3DDevice9_Reset(_cpu *cpu)
            unreported. */
         if (atomic_load(&d->lost))
         {
-            uint32_t n = d3d_restore_lost_mips(d);
+            (void)d3d_restore_lost_mips(d);
             atomic_store(&d->lost, false);
-            rt_log("D3D9: Reset: the lost device is usable again; %u textures get their mipmaps again", n);
         }
-        rt_log("D3D9: Reset: %ux%u, format 0x%x, %s, window 0x%08x", d->pp[PP_WIDTH], d->pp[PP_HEIGHT], d->pp[PP_FORMAT],
-               d->pp[PP_WINDOWED] ? "windowed" : "full screen", d->pp[PP_HWND]);
         default_state(d);
         for (i = 0; i < 14; i++) wr32(ppp + 4u * i, d->pp[i]);
     }

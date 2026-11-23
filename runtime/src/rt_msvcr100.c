@@ -56,9 +56,8 @@
 /* rt_seh.c: ends the process with STATUS_INVALID_CRUNTIME_PARAMETER. */
 void rt__invoke_watson(_cpu *cpu);
 
-static void invalid_parameter(_cpu *cpu, const char *fn)
+static void invalid_parameter(_cpu *cpu)
 {
-    rt_log("MSVCR100: invalid parameter in %s", fn);
     rt__invoke_watson(cpu);
 }
 
@@ -244,7 +243,7 @@ void rt__aligned_malloc(_cpu *cpu)
     uint32_t size = ARG(0), align = ARG(1), block, p;
     if (align == 0 || (align & (align - 1u)) != 0)
     {
-        invalid_parameter(cpu, "_aligned_malloc");
+        invalid_parameter(cpu);
         return;
     }
     if (align < 4u) align = 4u;
@@ -721,7 +720,7 @@ void rt_msvcr100_sprintf_s(_cpu *cpu)
     out_buf *o;
     if (dst == 0 || size == 0 || fmt == 0)
     {
-        invalid_parameter(cpu, "sprintf_s");
+        invalid_parameter(cpu);
         return;
     }
     o = malloc(sizeof *o);
@@ -731,14 +730,14 @@ void rt_msvcr100_sprintf_s(_cpu *cpu)
     {
         free(o);
         wr8(dst, 0);
-        invalid_parameter(cpu, "sprintf_s (format)");
+        invalid_parameter(cpu);
         return;
     }
     if (o->n + 1u > size)
     {
         free(o);
         wr8(dst, 0);
-        invalid_parameter(cpu, "sprintf_s (buffer too small)");
+        invalid_parameter(cpu);
         return;
     }
     memcpy(G2H(dst), o->b, o->n);

@@ -392,7 +392,6 @@ uint32_t d3d_create_texture(D3DDevice *d, bool cube, uint32_t w, uint32_t h, uin
     if (out == 0 || w == 0 || h == 0 || w > 16384u || h > 16384u || (cube && w != h)) return D3DERR_INVALIDCALL;
     if (f == NULL)
     {
-        rt_log("D3D9: texture format 0x%08x is not supported", fmt);
         return D3DERR_INVALIDCALL;
     }
     if (pool > D3DPOOL_SCRATCH) return D3DERR_INVALIDCALL;
@@ -454,11 +453,6 @@ uint32_t d3d_create_texture(D3DDevice *d, bool cube, uint32_t w, uint32_t h, uin
     o = make_object(cube ? &d3d_cube_class : &d3d_texture_class, t);
     t->com = o;
     write_iface(o, out);
-    if (usage & (D3DUSAGE_RENDERTARGET | D3DUSAGE_DEPTHSTENCIL))
-        rt_log("D3D9: %s%s texture %ux%u, format 0x%08x, %u levels%s%s", cube ? "cube " : "",
-               (usage & D3DUSAGE_DEPTHSTENCIL) ? "depth-stencil" : "render target", w, h, fmt, levels,
-               t->scale > 1 ? ", shadow buffer: Metal storage 4x in each dimension" : "",
-               f->conv == D3DCONV_PROMOTED ? ", stored as RGBA32Float" : "");
     return D3D_OK;
 }
 
@@ -474,7 +468,6 @@ uint32_t d3d_create_volume_texture(D3DDevice *d, uint32_t w, uint32_t h, uint32_
     if (out == 0 || w == 0 || h == 0 || depth == 0 || w > 2048u || h > 2048u || depth > 2048u) return D3DERR_INVALIDCALL;
     if (f == NULL)
     {
-        rt_log("D3D9: volume texture format 0x%08x is not supported", fmt);
         return D3DERR_INVALIDCALL;
     }
     if (pool > D3DPOOL_SCRATCH) return D3DERR_INVALIDCALL;
@@ -1062,7 +1055,6 @@ uint32_t d3d_create_surface(D3DDevice *d, uint32_t w, uint32_t h, uint32_t fmt, 
     if (w == 0 || h == 0 || w > 16384u || h > 16384u) return D3DERR_INVALIDCALL;
     if (f == NULL)
     {
-        rt_log("D3D9: surface format 0x%08x is not supported", fmt);
         return D3DERR_INVALIDCALL;
     }
     if ((usage & D3DUSAGE_RENDERTARGET) && !f->renderable) return D3DERR_INVALIDCALL;
@@ -1101,11 +1093,6 @@ uint32_t d3d_create_surface(D3DDevice *d, uint32_t w, uint32_t h, uint32_t fmt, 
     }
     *out_obj = make_object(&d3d_surface_class, s);
     s->com = *out_obj;
-    if (usage & (D3DUSAGE_RENDERTARGET | D3DUSAGE_DEPTHSTENCIL))
-        rt_log("D3D9: %s surface %ux%u, format 0x%08x, %u samples%s%s",
-               (usage & D3DUSAGE_DEPTHSTENCIL) ? "depth-stencil" : "render target", w, h, fmt, msaa,
-               s->scale > 1 ? ", shadow buffer: Metal storage 4x in each dimension" : "",
-               f->conv == D3DCONV_PROMOTED ? ", stored as RGBA32Float" : "");
     return D3D_OK;
 }
 

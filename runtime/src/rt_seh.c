@@ -252,17 +252,6 @@ void rt_seh_nested_handler(_cpu *cpu)
     rt_fatal("corrupted runtime exception frame at 0x%08x", reg);
 }
 
-static void describe(uint32_t rec, uint32_t ctx)
-{
-    uint32_t n = rd32(rec + ER_NPARAMS), i;
-    rt_log("exception 0x%08x flags 0x%x at 0x%08x, %u parameters", rd32(rec + ER_CODE), rd32(rec + ER_FLAGS),
-           rd32(rec + ER_ADDRESS), n);
-    for (i = 0; i < n && i < ER_MAX_PARAMS; i++) rt_log("  parameter %u: 0x%08x", i, rd32(rec + ER_INFO + 4u * i));
-    rt_log("  eax=%08x ebx=%08x ecx=%08x edx=%08x esi=%08x edi=%08x ebp=%08x esp=%08x eip=%08x",
-           rd32(ctx + CX_EAX), rd32(ctx + CX_EBX), rd32(ctx + CX_ECX), rd32(ctx + CX_EDX), rd32(ctx + CX_ESI),
-           rd32(ctx + CX_EDI), rd32(ctx + CX_EBP), rd32(ctx + CX_ESP), rd32(ctx + CX_EIP));
-}
-
 /* ---------------------------------------------------------------- unhandled exceptions */
 
 /* UnhandledExceptionFilter for EXCEPTION_POINTERS ptrs. */
@@ -278,9 +267,7 @@ static int32_t unhandled_filter(_cpu *cpu, uint32_t ptrs)
         if (r == EXCEPTION_EXECUTE_HANDLER || r == EXCEPTION_CONTINUE_EXECUTION) return r;
     }
     /* Windows shows the error report dialog here unless SEM_NOGPFAULTERRORBOX
-       (0x2) is set. The runtime writes the report to the log. */
-    rt_log("unhandled guest exception (error mode 0x%x):", error_mode);
-    describe(rd32(ptrs + 0), rd32(ptrs + 4));
+       (0x2) is set. The runtime shows no report. */
     return EXCEPTION_EXECUTE_HANDLER;
 }
 
@@ -451,7 +438,6 @@ static uint32_t end_of_chain(_cpu *cpu, uint32_t rec, uint32_t ctx)
         if (rd32(rec + ER_FLAGS) & EXCEPTION_NONCONTINUABLE) raise_status(cpu, STATUS_NONCONTINUABLE_EXCEPTION, rec, ctx);
         return load_context(cpu, ctx);
     }
-    rt_log("the process ends because of unhandled exception 0x%08x", rd32(rec + ER_CODE));
     rt_process_exit(rd32(rec + ER_CODE));
     rt_fatal("process exit returned");
 }
@@ -845,9 +831,11 @@ uint32_t rt_longjmp(_cpu *cpu)
 
 /* ---------------------------------------------------------------- C runtime termination */
 
+/* The C runtime message is an error: it goes to stderr, which the loader
+   shows when the game stops. */
 static void crt_message(const char *msg)
 {
-    rt_log("%s", msg);
+    fprintf(stderr, "[rt] %s\n", msg);
 }
 
 void rt_abort(_cpu *cpu)

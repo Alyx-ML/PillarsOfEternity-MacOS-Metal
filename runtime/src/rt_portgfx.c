@@ -43,6 +43,7 @@
 #include "rt.h"
 #include "rt_thread.h"
 #include "rt_portgfx_defs.h"
+#include "rt_window.h"
 
 #include <errno.h>
 #include <pthread.h>
@@ -90,7 +91,6 @@ void rt_portgfx_init(const char *path)
     if (f == NULL)
     {
         if (errno != ENOENT) rt_fatal("the graphics settings file %s cannot be read: %s", cfg_path, strerror(errno));
-        rt_log("graphics settings: %s is not there; the initial values are used", cfg_path);
     }
     else
     {
@@ -116,18 +116,6 @@ void rt_portgfx_init(const char *path)
         fclose(f);
     }
     for (i = 0; i < RT_GFX_COUNT; i++) atomic_store(&active[i], atomic_load(&saved[i]));
-    {
-        char msg[512];
-        size_t len = 0;
-        for (i = 0; i < RT_GFX_COUNT; i++)
-        {
-            int r = snprintf(msg + len, sizeof msg - len, "%s%s %d", i ? ", " : "", rt_gfx_defs[i].key,
-                             atomic_load(&active[i]));
-            if (r < 0 || (size_t)r >= sizeof msg - len) rt_fatal("graphics settings: the log line is too long");
-            len += (size_t)r;
-        }
-        rt_log("graphics settings: %s", msg);
-    }
     cfg_ready = true;
 }
 
@@ -149,24 +137,28 @@ static bool write_file(int id, int value)
     f = fopen(tmp, "w");
     if (f == NULL)
     {
-        rt_log("graphics settings: %s cannot be written: %s", tmp, strerror(errno));
         return false;
     }
     fputs(RT_GFX_FILE_COMMENT, f);
     for (i = 0; i < RT_GFX_COUNT; i++) fprintf(f, "%s %d\n", rt_gfx_defs[i].key, i == id ? value : atomic_load(&saved[i]));
     if (ferror(f) || fclose(f) != 0)
     {
-        rt_log("graphics settings: %s cannot be written: %s", tmp, strerror(errno));
         (void)remove(tmp);
         return false;
     }
     if (rename(tmp, cfg_path) != 0)
     {
-        rt_log("graphics settings: %s cannot be renamed to %s: %s", tmp, cfg_path, strerror(errno));
         (void)remove(tmp);
         return false;
     }
     return true;
+}
+
+/* int __stdcall PortGfxPixelScale(void): the Win32 units for each point
+   (rt_cocoa_pixel_scale), for the scale of the game's UI. */
+void rt_PortGfxPixelScale(_cpu *cpu)
+{
+    RET((uint32_t)rt_cocoa_pixel_scale());
 }
 
 /* int __stdcall PortGfxGet(int id): the saved value. */
@@ -198,9 +190,6 @@ void rt_PortGfxSet(_cpu *cpu)
         if (!rt_gfx_defs[id].restart) atomic_store(&active[id], value);
     }
     cfg_lock_drop();
-    if (ok)
-        rt_log("graphics settings: %s %d%s", rt_gfx_defs[id].key, value,
-               rt_gfx_defs[id].restart && value != atomic_load(&active[id]) ? " (takes effect at the next start)" : "");
     RET(ok ? 1u : 0u);
 }
 

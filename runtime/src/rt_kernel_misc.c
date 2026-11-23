@@ -83,12 +83,7 @@ void rt_VirtualAlloc(_cpu *cpu)
         if (base == 0)
         {
             /* The guest window has 2 GiB; a large-address-aware program
-               has 4 GiB on 64-bit Windows. Record the state of the guest
-               address space for the first failures. */
-            static _Atomic unsigned failures;
-            if (addr == 0 && failures++ < 8)
-                rt_log("VirtualAlloc: no free guest range of %u bytes (%llu MiB of the guest window are free)",
-                       (uint32_t)(end - start), (unsigned long long)(rt_va_free_bytes() >> 20));
+               has 4 GiB on 64-bit Windows. */
             rt_set_last_error(addr != 0 ? ERROR_INVALID_ADDRESS : ERROR_NOT_ENOUGH_MEMORY);
             RET(0);
             return;
@@ -368,8 +363,7 @@ void rt_GetLastError(_cpu *cpu)
 
 void rt_OutputDebugStringA(_cpu *cpu)
 {
-    uint32_t s = ARG(0);
-    if (s != 0) rt_log("debug: %s", (const char *)G2H(s));
+    (void)cpu;
 }
 
 /* lstrlenA and lstrlenW: NULL gives 0. */
@@ -1770,7 +1764,6 @@ static void format_message(_cpu *cpu, bool wide)
             if (system_messages[i].id == id) text = system_messages[i].text;
         if (text == NULL)
         {
-            rt_log("%s: no system message text for code %u", fn, id);
             rt_set_last_error(ERROR_MR_MID_NOT_FOUND);
             RET(0);
             return;

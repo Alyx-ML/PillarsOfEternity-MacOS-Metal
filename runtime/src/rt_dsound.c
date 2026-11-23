@@ -458,7 +458,6 @@ static uint32_t open_unit(dsbuf *b)
     if (st == noErr) st = AudioUnitInitialize(b->unit);
     if (st != noErr)
     {
-        rt_log("DSOUND: the audio unit does not accept the format (%u Hz, %u channels): OSStatus %d", b->f.rate, b->f.channels, (int)st);
         AudioComponentInstanceDispose(b->unit);
         b->unit = NULL;
         return DSERR_BADFORMAT;
@@ -489,9 +488,9 @@ static void buffer_destroy(rt_com_object *o)
     dsbuf *b = o->data;
     if (b->unit != NULL)
     {
-        if (b->unit_started && AudioOutputUnitStop(b->unit) != noErr) rt_log("DSOUND: AudioOutputUnitStop failed");
-        if (AudioUnitUninitialize(b->unit) != noErr) rt_log("DSOUND: AudioUnitUninitialize failed");
-        if (AudioComponentInstanceDispose(b->unit) != noErr) rt_log("DSOUND: AudioComponentInstanceDispose failed");
+        (void)(b->unit_started && AudioOutputUnitStop(b->unit) != noErr);
+        (void)(AudioUnitUninitialize(b->unit) != noErr);
+        (void)(AudioComponentInstanceDispose(b->unit) != noErr);
     }
     if (b->mem != NULL) mem_release(b->mem);
     rt_com_release(b->devobj);
@@ -532,7 +531,7 @@ static uint32_t publish_buffer(rt_com_object *devobj, dsbuf *b, uint32_t ppbuf)
 
 /* ---------------------------------------------------------------- DirectSoundCreate */
 
-static void create_device(_cpu *cpu, const char *fn)
+static void create_device(_cpu *cpu)
 {
     uint32_t gp = ARG(0), ppds = ARG(1), outer = ARG(2);
     rt_com_object *o;
@@ -555,14 +554,12 @@ static void create_device(_cpu *cpu, const char *fn)
         {
             char text[39];
             rt_guid_format(&g, text);
-            rt_log("DSOUND: %s for device %s, which the emulated system does not have", fn, text);
             RET(DSERR_NODRIVER);
             return;
         }
     }
     if (default_output() == kAudioObjectUnknown)
     {
-        rt_log("DSOUND: %s: macOS has no default output device", fn);
         RET(DSERR_NODRIVER);
         return;
     }
@@ -591,7 +588,6 @@ static void create_device(_cpu *cpu, const char *fn)
         RET(DSERR_OUTOFMEMORY);
         return;
     }
-    rt_log("DSOUND: %s: device object created", fn);
     wr32(ppds, rt_com_ptr(o, 0));
     RET(DS_OK);
 }
@@ -599,13 +595,13 @@ static void create_device(_cpu *cpu, const char *fn)
 /* HRESULT DirectSoundCreate(LPCGUID device, LPDIRECTSOUND *ds, LPUNKNOWN outer) */
 void rt_DirectSoundCreate(_cpu *cpu)
 {
-    create_device(cpu, "DirectSoundCreate");
+    create_device(cpu);
 }
 
 /* HRESULT DirectSoundCreate8(LPCGUID device, LPDIRECTSOUND8 *ds, LPUNKNOWN outer) */
 void rt_DirectSoundCreate8(_cpu *cpu)
 {
-    create_device(cpu, "DirectSoundCreate8");
+    create_device(cpu);
 }
 
 /* HRESULT DirectSoundEnumerateW(LPDSENUMCALLBACKW cb, LPVOID context)
@@ -684,7 +680,6 @@ void rt_com_DirectSound8_CreateSoundBuffer(_cpu *cpu)
     if (flags & DSBCAPS_LOCDEFER) rt_fatal("DSOUND: CreateSoundBuffer with DSBCAPS_LOCDEFER (not supported by the runtime)");
     if (flags & DSBCAPS_LOCHARDWARE)
     {
-        rt_log("DSOUND: CreateSoundBuffer with DSBCAPS_LOCHARDWARE: the emulated device has no hardware buffers");
         RET(DSERR_INVALIDCALL);
         return;
     }
@@ -701,7 +696,6 @@ void rt_com_DirectSound8_CreateSoundBuffer(_cpu *cpu)
         }
         b->primary = true;
         r = publish_buffer(devobj, b, ppbuf);
-        if (r == DS_OK) rt_log("DSOUND: primary buffer, flags 0x%08x", flags);
         RET(r);
         return;
     }
@@ -745,9 +739,6 @@ void rt_com_DirectSound8_CreateSoundBuffer(_cpu *cpu)
         return;
     }
     r = publish_buffer(devobj, b, ppbuf);
-    if (r == DS_OK)
-        rt_log("DSOUND: secondary buffer of %u bytes: %u Hz, %u bits%s, %u channels, flags 0x%08x", bytes, b->f.rate, b->f.bits,
-               b->f.is_float ? " float" : "", b->f.channels, flags);
     RET(r);
 }
 
@@ -1188,7 +1179,6 @@ void rt_com_DirectSoundBuffer8_SetFormat(_cpu *cpu)
         memcpy(b->dev->pfmt, raw, n);
         b->dev->pfmt_size = n;
         dunlock();
-        rt_log("DSOUND: primary format %u Hz, %u bits%s, %u channels", f.rate, f.bits, f.is_float ? " float" : "", f.channels);
     }
     RET(r);
 }

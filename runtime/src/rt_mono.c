@@ -399,16 +399,13 @@ void rt_mono_dll_loaded(uint32_t base)
     if (rd32(HANDLE_STACKOVERFLOW_VAR) != 0)
         rt_fatal("mono.dll: the stack overflow helper variable at 0x%08x is not zero", HANDLE_STACKOVERFLOW_VAR);
     wr32(HANDLE_STACKOVERFLOW_VAR, H2G(rt_mono_stack_overflow_asm2c));
-    rt_log("mono.dll stack overflow helper: rt_mono_stack_overflow");
     if (memcmp(G2H(THREAD_INIT_TLSALLOC_ADDR), thread_init_tlsalloc, sizeof(thread_init_tlsalloc)) != 0)
         rt_fatal("mono.dll: the TlsAlloc call of mono_thread_init is not at 0x%08x", THREAD_INIT_TLSALLOC_ADDR);
     rt_tls_reserve_for_call(THREAD_INIT_TLSALLOC_RET, MONO_THREAD_TLS_INDEX);
-    rt_log("mono.dll: TLS index %u is reserved for the current thread key of mono_thread_init", MONO_THREAD_TLS_INDEX);
     if (memcmp(G2H(NATIVE_WRAPPER_PUSH_ADDR), native_wrapper_push, sizeof(native_wrapper_push)) != 0 ||
         memcmp(G2H(LDPTR_DISABLE_AOT_ADDR), ldptr_disable_aot, sizeof(ldptr_disable_aot)) != 0)
         rt_fatal("mono.dll: the GetLastError code of the native wrappers is not at 0x%08x and 0x%08x",
                  NATIVE_WRAPPER_PUSH_ADDR, LDPTR_DISABLE_AOT_ADDR);
-    rt_log("mono.dll: the native wrappers read GetLastError from its import slot 0x%08x", GET_LAST_ERROR_SLOT);
     check_can_access_method();
     if (memcmp(G2H(PATCH_METHOD_CHECK_ADDR), patch_method_check, sizeof(patch_method_check)) != 0)
         rt_fatal("mono.dll: the MONO_PATCH_INFO_METHOD case of the AOT compiler is not at 0x%08x", PATCH_METHOD_CHECK_ADDR);
@@ -509,7 +506,6 @@ static void load_aot_instances(_cpu *cpu, uint32_t domain)
     rt_heap_free(path);
     if (assembly == 0) rt_fatal("mono.dll: the AOT instance assembly %s cannot be opened", aot_instances_path);
     aot_instances_loaded = true;
-    rt_log("mono.dll: AOT instance assembly %s is loaded", aot_instances_path);
 }
 
 /* MonoDomain *mono_jit_init_version (const char *name, const char *version) */
@@ -551,7 +547,6 @@ void rt_mono_set_aot_only(uint32_t base)
         rt_fatal("mono.dll: the --full-aot store of mono_main is not at 0x%08x", MONO_MAIN_FULL_AOT_ADDR);
     if (rd32(MONO_AOT_ONLY_VAR) != 0) rt_fatal("mono.dll: mono_aot_only at 0x%08x is not zero", MONO_AOT_ONLY_VAR);
     wr32(MONO_AOT_ONLY_VAR, 1);
-    rt_log("mono.dll: AOT-only mode");
     /* BinaryFormatter (the save games of Persistent.BinarySerialize) makes
        a TypeMetadata class for each serialized type with Reflection.Emit
        (CodeGenerator.GenerateMetadataType). The JIT must compile that
@@ -560,6 +555,16 @@ void rt_mono_set_aot_only(uint32_t base)
        ObjectWriter.CreateMemberTypeMetadata uses MemberTypeMetadata, which
        reads the fields with reflection and needs no JIT. */
     rt_env_set("MONO_REFLECTION_SERIALIZER", "yes");
+    /* XmlSerializer compiles a serializer in the background after 50 uses
+       of a type (RunSerializerGeneration). The compile needs the C#
+       compiler of Mono (CSharpCodeCompiler..cctor looks for bin\mono.exe
+       and gmcs.exe next to GacPath); the game has none, so the type
+       initializer throws on every system (on Windows: "Windows mono path
+       not found"), and in AOT-only mode the JIT cannot run the result. With
+       "no", XmlSerializer..cctor sets generationThreshold to -1 and does
+       not start the generation; the serializer stays the reflection
+       serializer that the game uses until the generation would end. */
+    rt_env_set("MONO_XMLSERIALIZER_THS", "no");
 }
 
 /* ---------------------------------------------------------------- port graphics rows */
@@ -629,7 +634,6 @@ static void port_graphics_open(_cpu *cpu, uint32_t domain)
     rt_heap_free(name);
     rt_heap_free(tick);
     pg_domain = domain;
-    rt_log("mono.dll: port graphics assembly %s is loaded in domain 0x%08x", port_graphics_path, domain);
 }
 
 void rt_mono_port_tick(_cpu *cpu)

@@ -180,7 +180,6 @@ static uint32_t wsa_error(int e)
     case EHOSTDOWN: return WSAEHOSTDOWN;
     case EHOSTUNREACH: return WSAEHOSTUNREACH;
     default:
-        rt_log("Winsock: host error %d (%s) has no WSA code; reported as WSAEINVAL", e, strerror(e));
         return WSAEINVAL;
     }
 }
@@ -211,7 +210,7 @@ static void sock_destroy(rt_object *o)
     wsock *w = o->data;
     if (w != NULL)
     {
-        if (close(w->fd) != 0) rt_log("Winsock: close of socket fd %d failed: %s", w->fd, strerror(errno));
+        (void)(close(w->fd) != 0);
         free(w);
     }
 }

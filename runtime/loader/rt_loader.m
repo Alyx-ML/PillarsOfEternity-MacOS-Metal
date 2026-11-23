@@ -25,14 +25,17 @@
  *    the program. Of the programs with a different <id>, the loader keeps
  *    the one that was used last and removes the others.
  * 4. Start the game program:
- *      PillarsOfEternity <game directory> <player directory> -force-d3d9
+ *      PillarsOfEternity <game directory> <player directory> -force-d3d9 -nolog
  *    The player directory (Player in the folder of the port) holds the
  *    saved games and the settings of the game (user/), the data of the
  *    game for all users (programdata/) and the cache of the Metal pipelines.
- *    The output of the game goes to PillarsOfEternity.log in the folder of
- *    the port (the log of the start before is PillarsOfEternity.previous.log).
- *    The loader waits until the game ends. If the game stops with an error,
- *    an alert shows the end of the log.
+ *    No log files are written: -nolog stops the output_log.txt of Unity,
+ *    the runtime writes only the message of a fatal error, and the loader
+ *    keeps the end of the error output of the game in memory. The loader
+ *    removes the log files of earlier versions of the port
+ *    (PillarsOfEternity.log, PillarsOfEternity.previous.log). It waits
+ *    until the game ends. If the game stops with an error, an alert shows
+ *    the end of the error output.
  *
  * An error shows an alert and ends the process.
  */
@@ -67,8 +70,9 @@ extern char **environ;
 #define DEFAULTS_GAME_DIR @"GameDirectory"
 #define PATH_LEN 1024
 #define GAME_PROGRAM "PillarsOfEternity"
-#define LOG_NAME "PillarsOfEternity.log"
-#define PREVIOUS_LOG_NAME "PillarsOfEternity.previous.log"
+/* The log files of earlier versions of the port. */
+#define OLD_LOG_NAME "PillarsOfEternity.log"
+#define OLD_PREVIOUS_LOG_NAME "PillarsOfEternity.previous.log"
 #define LOG_TAIL 2000
 
 typedef struct pinned_file {
@@ -100,7 +104,6 @@ static void ensure_app(void)
 static void show_alert(NSString *title, NSString *text, NSAlertStyle style)
 {
     NSAlert *a;
-    fprintf(stderr, "Pillars of Eternity: %s %s\n", title.UTF8String, text.UTF8String);
     ensure_app();
     [NSApp setActivationPolicy:NSApplicationActivationPolicyRegular];
     a = [NSAlert new];
@@ -606,8 +609,11 @@ static void get_program(const char *game_dir, const char *base_dir, char *progra
         char rm_err[PATH_LEN + 64];
         bool closed = ui.closed;
         NSString *msg = str(s->job.error);
-        if (!remove_tree(dir, rm_err, sizeof rm_err)) fprintf(stderr, "Pillars of Eternity: %s\n", rm_err);
+        bool removed = remove_tree(dir, rm_err, sizeof rm_err);
         free(s);
+        if (!removed)
+            fail(@"Pillars of Eternity cannot be prepared for this Mac.",
+                 [NSString stringWithFormat:@"%@\n\nThe work folder cannot be removed: %s", closed ? @"The conversion was cancelled." : msg, rm_err]);
         if (closed) exit(0);
         fail(@"Pillars of Eternity cannot be prepared for this Mac.", msg);
     }
@@ -639,48 +645,92 @@ static void get_program(const char *game_dir, const char *base_dir, char *progra
 }
 @end
 
-static NSString *log_tail(const char *path)
+/* The end of the error output of the game (main queue only). */
+static char g_tail[LOG_TAIL];
+static size_t g_tail_len;
+
+/* Read what the game wrote to the pipe (non-blocking) and keep the last
+   LOG_TAIL bytes. Returns false at the end of the output. */
+static bool read_output(int fd)
 {
-    char buf[LOG_TAIL + 1];
-    size_t got = 0;
-    long end;
-    FILE *f = fopen(path, "rb");
-    if (f == NULL) return @"(the log cannot be read)";
-    if (fseek(f, 0, SEEK_END) == 0 && (end = ftell(f)) >= 0 &&
-        fseek(f, end > LOG_TAIL ? end - LOG_TAIL : 0, SEEK_SET) == 0)
-        got = fread(buf, 1, LOG_TAIL, f);
-    fclose(f);
-    buf[got] = 0;
-    return [[NSString alloc] initWithBytes:buf length:got encoding:NSUTF8StringEncoding]
-               ?: [[NSString alloc] initWithBytes:buf length:got encoding:NSISOLatin1StringEncoding];
+    char chunk[4096];
+    for (;;)
+    {
+        ssize_t n = read(fd, chunk, sizeof chunk);
+        size_t add, drop;
+        if (n < 0 && errno == EINTR) continue;
+        if (n < 0 && errno == EAGAIN) return true;
+        if (n <= 0) return false;
+        add = (size_t)n;
+        if (add >= LOG_TAIL)
+        {
+            memcpy(g_tail, chunk + add - LOG_TAIL, LOG_TAIL);
+            g_tail_len = LOG_TAIL;
+            continue;
+        }
+        drop = g_tail_len + add > LOG_TAIL ? g_tail_len + add - LOG_TAIL : 0;
+        memmove(g_tail, g_tail + drop, g_tail_len - drop);
+        g_tail_len -= drop;
+        memcpy(g_tail + g_tail_len, chunk, add);
+        g_tail_len += add;
+    }
+}
+
+static NSString *output_tail(void)
+{
+    NSString *s;
+    if (g_tail_len == 0) return @"(the game wrote no message)";
+    s = [[NSString alloc] initWithBytes:g_tail length:g_tail_len encoding:NSUTF8StringEncoding];
+    return s ?: [[NSString alloc] initWithBytes:g_tail length:g_tail_len encoding:NSISOLatin1StringEncoding];
+}
+
+static void remove_old_log(const char *base_dir, const char *name)
+{
+    char path[PATH_LEN];
+    if (!join(path, sizeof path, base_dir, name)) fail(@"The home folder path is too long.", str(base_dir));
+    if (unlink(path) != 0 && errno != ENOENT)
+        fail(@"An old log file cannot be removed.", [NSString stringWithFormat:@"%s: %s", path, strerror(errno)]);
 }
 
 static _Noreturn void run_game(const char *program, const char *game_dir, const char *player_dir, const char *base_dir)
 {
-    char log[PATH_LEN], previous[PATH_LEN], user[PATH_LEN], data[PATH_LEN];
-    char *argv[] = { (char *)program, (char *)game_dir, (char *)player_dir, (char *)"-force-d3d9", NULL };
+    char user[PATH_LEN], data[PATH_LEN];
+    char *argv[] = { (char *)program, (char *)game_dir, (char *)player_dir, (char *)"-force-d3d9", (char *)"-nolog", NULL };
     posix_spawn_file_actions_t fa;
     __block bool ended = false;
     __block int status = 0;
     RTWaiter *waiter = [RTWaiter new];
-    dispatch_source_t src;
+    dispatch_source_t src, out_src;
     pid_t pid;
-    int r;
+    int r, out[2];
 
-    if (!join(log, sizeof log, base_dir, LOG_NAME) || !join(previous, sizeof previous, base_dir, PREVIOUS_LOG_NAME) ||
-        !join(user, sizeof user, player_dir, "user") || !join(data, sizeof data, player_dir, "programdata"))
+    if (!join(user, sizeof user, player_dir, "user") || !join(data, sizeof data, player_dir, "programdata"))
         fail(@"The home folder path is too long.", str(base_dir));
     mkdir_p(user);
     mkdir_p(data);
-    if (rename(log, previous) != 0 && errno != ENOENT)
-        fail(@"The log file cannot be kept.", [NSString stringWithFormat:@"%s: %s", log, strerror(errno)]);
+    remove_old_log(base_dir, OLD_LOG_NAME);
+    remove_old_log(base_dir, OLD_PREVIOUS_LOG_NAME);
+    /* The standard output and the standard error of the game go to a pipe;
+       the loader keeps the end in memory. */
+    if (pipe(out) != 0) fail(@"The game cannot start.", [NSString stringWithFormat:@"pipe failed: %s", strerror(errno)]);
+    if (fcntl(out[0], F_SETFD, FD_CLOEXEC) != 0 || fcntl(out[0], F_SETFL, O_NONBLOCK) != 0)
+        fail(@"The game cannot start.", [NSString stringWithFormat:@"fcntl failed: %s", strerror(errno)]);
     if (posix_spawn_file_actions_init(&fa) != 0) fail(@"The game cannot start.", @"posix_spawn_file_actions_init failed.");
     r = posix_spawn_file_actions_addopen(&fa, 0, "/dev/null", O_RDONLY, 0);
-    if (r == 0) r = posix_spawn_file_actions_addopen(&fa, 1, log, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-    if (r == 0) r = posix_spawn_file_actions_adddup2(&fa, 1, 2);
+    if (r == 0) r = posix_spawn_file_actions_adddup2(&fa, out[1], 1);
+    if (r == 0) r = posix_spawn_file_actions_adddup2(&fa, out[1], 2);
+    if (r == 0) r = posix_spawn_file_actions_addclose(&fa, out[1]);
     if (r == 0) r = posix_spawn(&pid, program, &fa, NULL, argv, environ);
     posix_spawn_file_actions_destroy(&fa);
+    if (close(out[1]) != 0) fail(@"The game cannot start.", [NSString stringWithFormat:@"close failed: %s", strerror(errno)]);
     if (r != 0) fail(@"The game cannot start.", [NSString stringWithFormat:@"%s: %s", program, strerror(r)]);
+    out_src = dispatch_source_create(DISPATCH_SOURCE_TYPE_READ, (uintptr_t)out[0], 0, dispatch_get_main_queue());
+    if (out_src == nil) fail(@"The game cannot be watched.", @"dispatch_source_create failed.");
+    int out_fd = out[0];
+    dispatch_source_set_event_handler(out_src, ^{
+      if (!read_output(out_fd)) dispatch_source_cancel(out_src);
+    });
+    dispatch_resume(out_src);
 
     /* The game has its own windows and its own entry in the Dock. */
     ensure_app();
@@ -728,9 +778,11 @@ static _Noreturn void run_game(const char *program, const char *game_dir, const 
     if (!ended) exit(0);
     if (status == -1) fail(@"The game cannot be watched.", @"waitpid failed.");
     if (WIFEXITED(status) && WEXITSTATUS(status) == 0) exit(0);
+    /* What the game wrote last, before the source delivered it. */
+    (void)read_output(out[0]);
     fail(WIFSIGNALED(status) ? [NSString stringWithFormat:@"The game stopped with signal %d.", WTERMSIG(status)]
                              : [NSString stringWithFormat:@"The game stopped with exit status %d.", WEXITSTATUS(status)],
-         [NSString stringWithFormat:@"The log is %s. Its end:\n\n%@", log, log_tail(log)]);
+         [NSString stringWithFormat:@"The end of its error output:\n\n%@", output_tail()]);
 }
 
 int main(int argc, char **argv)

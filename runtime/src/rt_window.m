@@ -52,6 +52,12 @@
 
 static bool g_headless;
 static atomic_int g_title_h;
+/* Win32 units for each point (the backing scale of the main display at
+   start, 2 on a Retina display). The program sees the screen, its windows
+   and the cursor in backing pixels: the game renders and lays out its UI at
+   the full resolution of a Retina display, with no upscale. Set once by
+   rt_cocoa_init, before other threads run. */
+static int g_px = 1;
 static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
 static atomic_bool g_wake_posted;
 
@@ -88,21 +94,31 @@ static CGFloat main_height(void)
     return CGDisplayBounds(CGMainDisplayID()).size.height;
 }
 
+/* Win32 units <-> points (g_px). */
+static CGFloat pt(int32_t v)
+{
+    return (CGFloat)v / (CGFloat)g_px;
+}
+
+static int32_t px(CGFloat v)
+{
+    return round32(v * (CGFloat)g_px);
+}
+
 /* Win32 screen rectangle -> AppKit screen rectangle. */
 static NSRect to_ns(rt_rect r)
 {
-    return NSMakeRect((CGFloat)r.left, main_height() - (CGFloat)r.bottom, (CGFloat)(r.right - r.left),
-                      (CGFloat)(r.bottom - r.top));
+    return NSMakeRect(pt(r.left), main_height() - pt(r.bottom), pt(r.right - r.left), pt(r.bottom - r.top));
 }
 
 /* AppKit screen rectangle -> Win32 screen rectangle. */
 static rt_rect from_ns(NSRect f)
 {
     rt_rect r;
-    r.left = round32(f.origin.x);
-    r.top = round32(main_height() - NSMaxY(f));
-    r.right = r.left + round32(f.size.width);
-    r.bottom = r.top + round32(f.size.height);
+    r.left = px(f.origin.x);
+    r.top = px(main_height() - NSMaxY(f));
+    r.right = r.left + px(f.size.width);
+    r.bottom = r.top + px(f.size.height);
     return r;
 }
 
@@ -329,8 +345,8 @@ void rt_cocoa_cursor_pos(int32_t *x, int32_t *y)
     if (e == NULL) rt_fatal("Cocoa: the cursor position is not available (CGEventCreate failed)");
     p = CGEventGetLocation(e);
     CFRelease(e);
-    *x = (int32_t)floor(p.x);
-    *y = (int32_t)floor(p.y);
+    *x = (int32_t)floor(p.x * g_px);
+    *y = (int32_t)floor(p.y * g_px);
 }
 
 static void clamp_to_clip(int32_t *x, int32_t *y)
@@ -352,7 +368,9 @@ void rt_cocoa_cursor_move(int32_t x, int32_t y)
         gunlock();
         return;
     }
-    if (CGWarpMouseCursorPosition(CGPointMake((CGFloat)x, (CGFloat)y)) != kCGErrorSuccess)
+    /* The center of the Win32 pixel, so that rt_cocoa_cursor_pos gives the
+       same pixel back. */
+    if (CGWarpMouseCursorPosition(CGPointMake(((CGFloat)x + 0.5) / g_px, ((CGFloat)y + 0.5) / g_px)) != kCGErrorSuccess)
         rt_fatal("Cocoa: the cursor could not be moved (CGWarpMouseCursorPosition failed)");
     if (CGAssociateMouseAndMouseCursorPosition(true) != kCGErrorSuccess)
         rt_fatal("Cocoa: CGAssociateMouseAndMouseCursorPosition failed");
@@ -444,7 +462,7 @@ double rt_cocoa_refresh_interval_at(int32_t x, int32_t y)
     CGDirectDisplayID id;
     uint32_t count = 0;
     double r = 0.0;
-    if (CGGetDisplaysWithPoint(CGPointMake(x, y), 1, &id, &count) != kCGErrorSuccess || count == 0) return 0.0;
+    if (CGGetDisplaysWithPoint(CGPointMake(pt(x), pt(y)), 1, &id, &count) != kCGErrorSuccess || count == 0) return 0.0;
     glock();
     for (int i = 0; i < g_ndisp; i++)
         if (g_disp[i].id == id) r = g_disp[i].min_interval;
@@ -475,14 +493,14 @@ int rt_cocoa_displays(rt_display out[RT_MAX_DISPLAYS])
             o = &out[k++];
             memset(o, 0, sizeof *o);
             o->id = d[i].id;
-            o->frame.left = round32(b.origin.x);
-            o->frame.top = round32(b.origin.y);
-            o->frame.right = o->frame.left + round32(b.size.width);
-            o->frame.bottom = o->frame.top + round32(b.size.height);
-            o->work.left = o->frame.left + round32(d[i].inset_l);
-            o->work.top = o->frame.top + round32(d[i].inset_t);
-            o->work.right = o->frame.right - round32(d[i].inset_r);
-            o->work.bottom = o->frame.bottom - round32(d[i].inset_b);
+            o->frame.left = px(b.origin.x);
+            o->frame.top = px(b.origin.y);
+            o->frame.right = o->frame.left + px(b.size.width);
+            o->frame.bottom = o->frame.top + px(b.size.height);
+            o->work.left = o->frame.left + px(d[i].inset_l);
+            o->work.top = o->frame.top + px(d[i].inset_t);
+            o->work.right = o->frame.right - px(d[i].inset_r);
+            o->work.bottom = o->frame.bottom - px(d[i].inset_b);
             o->main = d[i].id == main_id;
             o->refresh = d[i].refresh;
             memcpy(o->name, d[i].name, sizeof o->name);
@@ -531,8 +549,8 @@ int rt_cocoa_display_modes(uint32_t id, rt_display_mode *out, int max, int *curr
     int k = 0, j;
     *current = -1;
     if (all == NULL || cur == NULL) rt_fatal("Cocoa: the modes of display %u are not available", id);
-    cm.width = (uint32_t)CGDisplayModeGetWidth(cur);
-    cm.height = (uint32_t)CGDisplayModeGetHeight(cur);
+    cm.width = (uint32_t)CGDisplayModeGetWidth(cur) * (uint32_t)g_px;
+    cm.height = (uint32_t)CGDisplayModeGetHeight(cur) * (uint32_t)g_px;
     cm.refresh = mode_refresh(cur, sr);
     n = CFArrayGetCount(all);
     for (i = 0; i < n && k < max; i++)
@@ -541,8 +559,8 @@ int rt_cocoa_display_modes(uint32_t id, rt_display_mode *out, int max, int *curr
         rt_display_mode v;
         bool dup = false;
         if (!CGDisplayModeIsUsableForDesktopGUI(m)) continue;
-        v.width = (uint32_t)CGDisplayModeGetWidth(m);
-        v.height = (uint32_t)CGDisplayModeGetHeight(m);
+        v.width = (uint32_t)CGDisplayModeGetWidth(m) * (uint32_t)g_px;
+        v.height = (uint32_t)CGDisplayModeGetHeight(m) * (uint32_t)g_px;
         v.refresh = mode_refresh(m, sr);
         for (j = 0; j < k; j++)
             if (mode_cmp(&out[j], &v) == 0) dup = true;
@@ -582,7 +600,7 @@ bool rt_cocoa_set_display_mode(uint32_t id, const rt_display_mode *m, bool test)
         CGDisplayModeRef c = (CGDisplayModeRef)CFArrayGetValueAtIndex(all, i);
         uint32_t r = mode_refresh(c, sr);
         if (!CGDisplayModeIsUsableForDesktopGUI(c)) continue;
-        if (CGDisplayModeGetWidth(c) != m->width || CGDisplayModeGetHeight(c) != m->height) continue;
+        if (CGDisplayModeGetWidth(c) * (size_t)g_px != m->width || CGDisplayModeGetHeight(c) * (size_t)g_px != m->height) continue;
         if (m->refresh != 0 && r != m->refresh) continue;
         if (best == NULL)
         {
@@ -645,7 +663,12 @@ void rt_cocoa_restore_display_modes(void)
 
 int32_t rt_cocoa_title_height(void)
 {
-    return atomic_load(&g_title_h);
+    return atomic_load(&g_title_h) * g_px;
+}
+
+int rt_cocoa_pixel_scale(void)
+{
+    return g_px;
 }
 
 bool rt_cocoa_headless(void)
@@ -669,6 +692,16 @@ bool rt_cocoa_headless(void)
 @property (nonatomic) BOOL rtEnabled;
 @property (nonatomic) int suppress;
 @property (nonatomic) unsigned kind;
+/* Native full screen (see "Full screen"): fsMoving while AppKit moves the
+   window into or out of its full-screen space. A frame, kind or hide that
+   the program sets while the window is in full screen waits in fsPending*
+   until the window is out of full screen. */
+@property (nonatomic) BOOL fsMoving;
+@property (nonatomic) BOOL fsPendingFrameSet;
+@property (nonatomic) NSRect fsPendingFrame;
+@property (nonatomic) BOOL fsPendingKindSet;
+@property (nonatomic) unsigned fsPendingKind;
+@property (nonatomic) BOOL fsPendingHide;
 @end
 
 /* Wheel motion that is not yet a whole wheel unit (main thread). */
@@ -792,6 +825,10 @@ static void win_chars(NSString *s, uint16_t code, uint16_t *out, int *n)
     uint16_t chars[16];
     int n = 0;
     if (!self.metal || !self.rtEnabled) return; /* dialog panes: AppKit controls handle the keys */
+    /* F12 (kVK_F12): a screenshot to the screenshot folder of macOS. The
+       game also gets the key (it has no binding for F12 by default, and a
+       binding that the player made continues to work). */
+    if (event.keyCode == 0x6F && !event.isARepeat) rt_d3d9_request_screenshot();
     if (self.imeEnabled)
     {
         BOOL had = self.hasMarkedText;
@@ -918,6 +955,10 @@ static void win_chars(NSString *s, uint16_t code, uint16_t *out, int *n)
 /* ---------------------------------------------------------------- windows */
 
 static void update_presentation(RTWindow *w);
+static void leave_full_screen(RTWindow *w);
+static NSWindowStyleMask style_of(unsigned kind);
+static void apply_kind_extras(RTWindow *w, unsigned kind);
+static int g_fs_windows;
 
 @implementation RTWindow
 
@@ -976,6 +1017,62 @@ static void update_presentation(RTWindow *w);
     rt_user32_on_minimized(self.hwnd, false);
 }
 
+- (NSApplicationPresentationOptions)window:(NSWindow *)window
+      willUseFullScreenPresentationOptions:(NSApplicationPresentationOptions)proposed
+{
+    (void)window;
+    (void)proposed;
+    return NSApplicationPresentationFullScreen | NSApplicationPresentationHideDock | NSApplicationPresentationHideMenuBar;
+}
+
+- (void)windowDidEnterFullScreen:(NSNotification *)n
+{
+    (void)n;
+    self.fsMoving = NO;
+    if (self.fsPendingFrameSet || self.fsPendingKindSet || self.fsPendingHide) leave_full_screen(self);
+}
+
+- (void)windowDidFailToEnterFullScreen:(NSWindow *)window
+{
+    (void)window;
+    rt_fatal("Cocoa: the game window could not move into a full-screen space of macOS");
+}
+
+- (void)windowDidExitFullScreen:(NSNotification *)n
+{
+    (void)n;
+    self.fsMoving = NO;
+    self.collectionBehavior = NSWindowCollectionBehaviorFullScreenNone;
+    g_fs_windows--;
+    self.suppress++;
+    if (self.fsPendingKindSet)
+    {
+        NSRect content = [self contentRectForFrameRect:self.frame];
+        self.styleMask = style_of(self.fsPendingKind);
+        [self setFrame:[self frameRectForContentRect:content] display:YES];
+        apply_kind_extras(self, self.fsPendingKind);
+        self.fsPendingKindSet = NO;
+    }
+    if (self.fsPendingFrameSet)
+    {
+        [self setFrame:self.fsPendingFrame display:YES];
+        self.fsPendingFrameSet = NO;
+    }
+    self.suppress--;
+    if (self.fsPendingHide)
+    {
+        self.fsPendingHide = NO;
+        [self orderOut:nil];
+    }
+    update_presentation(self);
+}
+
+- (void)windowDidFailToExitFullScreen:(NSWindow *)window
+{
+    (void)window;
+    rt_fatal("Cocoa: the game window could not leave its full-screen space");
+}
+
 - (void)windowDidChangeBackingProperties:(NSNotification *)n
 {
     (void)n;
@@ -999,7 +1096,7 @@ static void report_mouse(RTView *v, NSEvent *e, uint32_t msg, int32_t data)
     NSPoint p;
     if (v == nil || !v.rtEnabled) return;
     p = [v convertPoint:e.locationInWindow fromView:nil];
-    rt_user32_on_mouse(v.hwnd, msg, (int32_t)floor(p.x), (int32_t)floor(p.y), data);
+    rt_user32_on_mouse(v.hwnd, msg, (int32_t)floor(p.x * g_px), (int32_t)floor(p.y * g_px), data);
 }
 
 static uint32_t button_msg(NSEvent *e, int phase, int32_t *data)
@@ -1136,18 +1233,74 @@ static void apply_kind_extras(RTWindow *w, unsigned kind)
     w.kind = kind;
 }
 
-/* A key borderless window that covers its display hides the menu bar and
-   the Dock (a Win32 full-screen window covers them). */
+/* ---- Full screen
+
+   A Win32 full-screen window is a borderless window that covers its
+   display. When such a window is the key window, it moves into its own
+   full-screen space of macOS (toggleFullScreen:), as a native full-screen
+   application: Command-Tab and Mission Control show the other
+   applications in their own spaces, and macOS turns on Game Mode for the
+   game (LSSupportsGameMode and the game category in the property list of
+   the program). In the space, the menu bar and the Dock stay hidden
+   (window:willUseFullScreenPresentationOptions:), also when the cursor is
+   at the top edge, where the game pans the camera.
+   A display with a camera housing (safeAreaInsets.top > 0) puts a
+   full-screen window below the housing, so the window would not have the
+   Win32 size. On such a display the window stays a borderless window
+   that covers the display, and the menu bar and the Dock are hidden with
+   presentation options; macOS does not use Game Mode for it.
+   The window leaves full screen when the program gives it a frame that
+   does not cover the display, a title bar or SW_HIDE; the change is made
+   when the window is out of full screen (windowDidExitFullScreen:). A
+   window in full screen is not miniaturized when the program minimizes
+   it (the game does that when it is no longer the active application):
+   the space keeps the last frame, and SC_RESTORE restores the game when
+   the application is active again (rt_user32_on_app_active). */
+static int g_fs_windows; /* windows in full screen or moving into it (main thread) */
+
+static bool frame_covers(NSRect f, NSRect s)
+{
+    return NSMinX(f) <= NSMinX(s) && NSMinY(f) <= NSMinY(s) && NSMaxX(f) >= NSMaxX(s) && NSMaxY(f) >= NSMaxY(s);
+}
+
+static bool in_full_screen(RTWindow *w)
+{
+    return w.fsMoving || (w.styleMask & NSWindowStyleMaskFullScreen) != 0;
+}
+
+static bool space_capable(NSScreen *s)
+{
+    return s != nil && s.safeAreaInsets.top <= 0;
+}
+
+static void leave_full_screen(RTWindow *w)
+{
+    if (w.fsMoving || !(w.styleMask & NSWindowStyleMaskFullScreen)) return; /* windowDidEnterFullScreen: leaves */
+    w.fsMoving = YES;
+    [w toggleFullScreen:nil];
+}
+
+/* A key borderless window that covers its display moves into full screen,
+   or, on a display with a camera housing, hides the menu bar and the Dock
+   (a Win32 full-screen window covers them). */
 static void update_presentation(RTWindow *w)
 {
     NSApplicationPresentationOptions want = NSApplicationPresentationDefault;
+    bool covers;
     if (g_headless) return;
-    if (w.isKeyWindow && w.isVisible && !(w.styleMask & NSWindowStyleMaskTitled) && w.screen != nil)
+    if (in_full_screen(w)) return; /* the space has its options */
+    covers = w.isVisible && !(w.styleMask & NSWindowStyleMaskTitled) && w.screen != nil &&
+             frame_covers(w.frame, w.screen.frame);
+    if (covers && w.isKeyWindow && space_capable(w.screen))
     {
-        NSRect f = w.frame, s = w.screen.frame;
-        if (NSMinX(f) <= NSMinX(s) && NSMinY(f) <= NSMinY(s) && NSMaxX(f) >= NSMaxX(s) && NSMaxY(f) >= NSMaxY(s))
-            want = NSApplicationPresentationHideDock | NSApplicationPresentationHideMenuBar;
+        w.collectionBehavior = NSWindowCollectionBehaviorFullScreenPrimary;
+        w.fsMoving = YES;
+        g_fs_windows++;
+        [w toggleFullScreen:nil];
+        return;
     }
+    if (g_fs_windows > 0) return; /* options cannot change while a space has the full-screen options */
+    if (covers && w.isKeyWindow) want = NSApplicationPresentationHideDock | NSApplicationPresentationHideMenuBar;
     if (!w.isKeyWindow && NSApp.keyWindow != nil && NSApp.keyWindow != w) return; /* the key window decides */
     if (NSApp.presentationOptions != want) NSApp.presentationOptions = want;
 }
@@ -1203,9 +1356,10 @@ void rt_cocoa_window_destroy(void *native)
     w = (__bridge_transfer RTWindow *)native;
     if (![w isKindOfClass:[RTWindow class]]) rt_fatal("rt_cocoa_window_destroy: the native object is not a window");
     w.delegate = nil;
+    if (in_full_screen(w)) g_fs_windows--; /* closing the window removes its space */
     [w orderOut:nil];
     [w close];
-    if (!g_headless && NSApp.keyWindow == nil) NSApp.presentationOptions = NSApplicationPresentationDefault;
+    if (!g_headless && NSApp.keyWindow == nil && g_fs_windows == 0) NSApp.presentationOptions = NSApplicationPresentationDefault;
 }
 
 void rt_cocoa_window_show(void *native, bool visible, bool activate)
@@ -1214,10 +1368,17 @@ void rt_cocoa_window_show(void *native, bool visible, bool activate)
     need_main("rt_cocoa_window_show");
     if (!visible)
     {
+        if (in_full_screen(w))
+        {
+            w.fsPendingHide = YES;
+            leave_full_screen(w);
+            return;
+        }
         [w orderOut:nil];
         return;
     }
     if (g_headless) rt_fatal("Cocoa: a window cannot be shown in headless mode");
+    w.fsPendingHide = NO;
     if (activate)
     {
         [w makeKeyAndOrderFront:nil];
@@ -1235,6 +1396,7 @@ void rt_cocoa_window_minimize(void *native, bool minimize)
     if (minimize && !w.miniaturized)
     {
         if (g_headless) return; /* a headless window is never on the screen */
+        if (in_full_screen(w)) return; /* the space keeps the window (see "Full screen") */
         [w miniaturize:nil];
     }
     else if (!minimize && w.miniaturized)
@@ -1245,6 +1407,19 @@ void rt_cocoa_window_set_client(void *native, rt_rect client)
 {
     RTWindow *w = as_window(native, "rt_cocoa_window_set_client");
     need_main("rt_cocoa_window_set_client");
+    if (in_full_screen(w))
+    {
+        NSRect f = [w frameRectForContentRect:to_ns(client)];
+        if (w.screen != nil && frame_covers(f, w.screen.frame) && !w.fsPendingKindSet)
+        {
+            w.fsPendingFrameSet = NO; /* the space already covers the display */
+            return;
+        }
+        w.fsPendingFrame = f;
+        w.fsPendingFrameSet = YES;
+        leave_full_screen(w);
+        return;
+    }
     w.suppress++;
     [w setFrame:[w frameRectForContentRect:to_ns(client)] display:YES];
     w.suppress--;
@@ -1265,6 +1440,18 @@ void rt_cocoa_window_set_kind(void *native, unsigned kind)
     need_main("rt_cocoa_window_set_kind");
     if ((kind & RT_WIN_METAL) != (w.kind & RT_WIN_METAL))
         rt_fatal("Cocoa: the content view of a window cannot change between Metal and a dialog pane");
+    if (in_full_screen(w))
+    {
+        if (style_of(kind) == style_of(w.kind) && !w.fsPendingKindSet)
+        {
+            apply_kind_extras(w, kind);
+            return;
+        }
+        w.fsPendingKind = kind;
+        w.fsPendingKindSet = YES;
+        leave_full_screen(w);
+        return;
+    }
     content = [w contentRectForFrameRect:w.frame];
     w.suppress++;
     w.styleMask = style_of(kind);
@@ -1447,9 +1634,11 @@ static NSTextAlignment ns_align(int align)
     return align == RT_ALIGN_CENTER ? NSTextAlignmentCenter : align == RT_ALIGN_RIGHT ? NSTextAlignmentRight : NSTextAlignmentLeft;
 }
 
+/* Child controls keep the text size of AppKit; on a Retina display their
+   frames are half the size in points of their Win32 size (g_px). */
 static NSRect view_rect(rt_rect r)
 {
-    return NSMakeRect((CGFloat)r.left, (CGFloat)r.top, (CGFloat)(r.right - r.left), (CGFloat)(r.bottom - r.top));
+    return NSMakeRect(pt(r.left), pt(r.top), pt(r.right - r.left), pt(r.bottom - r.top));
 }
 
 static NSView *as_view(void *v, const char *fn)
@@ -1876,7 +2065,7 @@ void rt_cocoa_tabs_insert(void *native, int index, const char *text, int width)
         [t setWidth:[t widthForSegment:i - 1] forSegment:i];
     }
     [t setLabel:ns_string(text) forSegment:index];
-    [t setWidth:(CGFloat)(width > 0 ? width : 1) forSegment:index];
+    [t setWidth:(width > 0 ? pt(width) : 1) forSegment:index];
     t.selectedSegment = sel < 0 ? -1 : sel >= index ? sel + 1 : sel;
     t.superview.needsLayout = YES;
     [t.superview layoutSubtreeIfNeeded];
@@ -1926,7 +2115,7 @@ void rt_cocoa_list_insert_column(void *native, int index, const char *title, int
     c = [[NSTableColumn alloc] initWithIdentifier:[NSString stringWithFormat:@"%d", index]];
     c.title = ns_string(title);
     c.headerCell.alignment = ns_align(align);
-    c.width = width > 0 ? (CGFloat)width : 0;
+    c.width = width > 0 ? pt(width) : 0;
     [t addTableColumn:c];
     for (i = (NSInteger)t.tableColumns.count - 1; i > index; i--) [t moveColumn:i - 1 toColumn:i];
     [t reloadData];
@@ -2022,7 +2211,6 @@ bool rt_cocoa_input_source_native(void)
 - (void)applicationDidBecomeActive:(NSNotification *)n
 {
     (void)n;
-    rt_log("macOS: the application is active");
     refresh_input_source(); /* the user can select another source in another application */
     rt_user32_on_app_active(true);
     enforce_clip();
@@ -2031,9 +2219,8 @@ bool rt_cocoa_input_source_native(void)
 - (void)applicationDidResignActive:(NSNotification *)n
 {
     (void)n;
-    rt_log("macOS: the application is no longer active");
     rt_user32_on_app_active(false);
-    if (!g_headless) NSApp.presentationOptions = NSApplicationPresentationDefault;
+    if (!g_headless && g_fs_windows == 0) NSApp.presentationOptions = NSApplicationPresentationDefault;
 }
 
 - (void)applicationDidChangeScreenParameters:(NSNotification *)n
@@ -2051,7 +2238,7 @@ static id g_monitor_local, g_monitor_global, g_monitor_keyup, g_input_source_obs
    the other applications (raw input with RIDEV_INPUTSINK). */
 static void mouse_motion_event(NSEvent *e)
 {
-    rt_user32_on_mouse_motion(e.deltaX, e.deltaY);
+    rt_user32_on_mouse_motion(e.deltaX * g_px, e.deltaY * g_px);
     enforce_clip();
 }
 
@@ -2064,6 +2251,11 @@ void rt_cocoa_init(bool headless)
     need_main("rt_cocoa_init");
     g_headless = headless;
     [NSApplication sharedApplication];
+    {
+        NSScreen *m = NSScreen.mainScreen;
+        long s = m != nil ? lround(m.backingScaleFactor) : 1;
+        g_px = s >= 1 && s <= 4 ? (int)s : 1;
+    }
     /* A process without an application bundle starts with the policy
        NSApplicationActivationPolicyProhibited. setActivationPolicy: returns
        NO for the policy that the application has (macOS 27.3). */
@@ -2079,9 +2271,27 @@ void rt_cocoa_init(bool headless)
     bar = [[NSMenu alloc] init];
     app = [[NSMenu alloc] initWithTitle:name];
     item = [[NSMenuItem alloc] initWithTitle:@"" action:NULL keyEquivalent:@""];
+    /* The standard items of a Mac application. Hide makes the application
+       inactive, as Command-Tab does. */
+    [app addItemWithTitle:[@"Hide " stringByAppendingString:name] action:@selector(hide:) keyEquivalent:@"h"];
+    [[app addItemWithTitle:@"Hide Others" action:@selector(hideOtherApplications:) keyEquivalent:@"h"]
+        setKeyEquivalentModifierMask:NSEventModifierFlagOption | NSEventModifierFlagCommand];
+    [app addItemWithTitle:@"Show All" action:@selector(unhideAllApplications:) keyEquivalent:@""];
+    [app addItem:[NSMenuItem separatorItem]];
     [app addItemWithTitle:[@"Quit " stringByAppendingString:name] action:@selector(terminate:) keyEquivalent:@"q"];
     item.submenu = app;
     [bar addItem:item];
+    {
+        /* Window > Minimize (Command-M) for a window with a title bar. A
+           borderless window (full screen) has no miniaturize button, so
+           AppKit disables the item for it. */
+        NSMenu *win = [[NSMenu alloc] initWithTitle:@"Window"];
+        NSMenuItem *wi = [[NSMenuItem alloc] initWithTitle:@"Window" action:NULL keyEquivalent:@""];
+        [win addItemWithTitle:@"Minimize" action:@selector(performMiniaturize:) keyEquivalent:@"m"];
+        wi.submenu = win;
+        [bar addItem:wi];
+        NSApp.windowsMenu = win;
+    }
     NSApp.mainMenu = bar;
     [NSApp finishLaunching];
     fr = [NSWindow frameRectForContentRect:NSMakeRect(0, 0, 100, 100)

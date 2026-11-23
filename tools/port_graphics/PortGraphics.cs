@@ -98,6 +98,7 @@ namespace PortGraphics
 
         public static void Tick()
         {
+            UiScale.Tick();
             PortController.Tick();
             try
             {
@@ -130,6 +131,92 @@ namespace PortGraphics
         static void Fail(string where, Exception e)
         {
             PortGfxFail("PortGraphics." + where + ": " + e.ToString());
+        }
+
+        // The game sees the screen in backing pixels (2 for each point on a
+        // Retina display, PortGfxPixelScale), so it renders the UI at the
+        // full resolution of the display. The UI keeps the size that it has
+        // at the resolution in points: NGUI and UIResolutionScaler size the
+        // UI from Screen.height, limited by UIRoot.maximumHeight, so each
+        // UIRoot gets the maximum height that the resolution in points gives
+        // (Screen.height / scale, limited by the game's minimum and maximum
+        // height). The dynamic fonts of the game then draw their glyphs at the
+        // full resolution (UIDynamicFontManager). A height that the game
+        // itself sets becomes the new limit.
+        static class UiScale
+        {
+            [DllImport("portgfx", CallingConvention = CallingConvention.StdCall)]
+            static extern int PortGfxPixelScale();
+
+            sealed class Root
+            {
+                public UIRoot Ui;
+                public int Min, Max;        // the game's values
+                public int SetMin, SetMax;  // the values written here
+            }
+
+            static readonly List<Root> s_Roots = new List<Root>();
+            static int s_Scale;
+
+            public static void Tick()
+            {
+                try
+                {
+                    if (s_Scale == 0) s_Scale = PortGfxPixelScale();
+                    if (s_Scale <= 1) return;
+                    List<UIRoot> all = UIRoot.list;
+                    if (all == null) return;
+                    s_Roots.RemoveAll(Gone);
+                    int h = Mathf.Max(2, Screen.height / s_Scale);
+                    foreach (UIRoot u in all)
+                    {
+                        if (u == null) continue;
+                        Root r = Find(u);
+                        if (r == null)
+                        {
+                            r = new Root();
+                            r.Ui = u;
+                            r.Min = u.minimumHeight;
+                            r.Max = u.maximumHeight;
+                            r.SetMin = int.MinValue;
+                            r.SetMax = int.MinValue;
+                            s_Roots.Add(r);
+                        }
+                        else
+                        {
+                            if (u.maximumHeight != r.SetMax) r.Max = u.maximumHeight;
+                            if (u.minimumHeight != r.SetMin) r.Min = u.minimumHeight;
+                        }
+                        int max = h;
+                        if (r.Max > 0) max = Mathf.Min(max, r.Max);
+                        if (u.scalingStyle != UIRoot.Scaling.FixedSize) max = Mathf.Max(max, r.Min);
+                        int min = Mathf.Min(r.Min, max);
+                        if (u.maximumHeight == max && u.minimumHeight == min) continue;
+                        u.maximumHeight = max;
+                        u.minimumHeight = min;
+                        r.SetMax = max;
+                        r.SetMin = min;
+                        foreach (Component c in u.GetComponentsInChildren(typeof(UIResolutionScaler), true))
+                            ((UIResolutionScaler)c).Apply();
+                    }
+                }
+                catch (Exception e)
+                {
+                    Fail("UiScale", e);
+                }
+            }
+
+            static Root Find(UIRoot u)
+            {
+                foreach (Root r in s_Roots)
+                    if (r.Ui == u) return r;
+                return null;
+            }
+
+            static bool Gone(Root r)
+            {
+                return r.Ui == null;
+            }
         }
 
         // The page of mgr.Pages that holds the Graphics Quality slider.
@@ -248,8 +335,6 @@ namespace PortGraphics
             AddSharpness(page, gamma, new Vector3(x, PagePos(page, quality).y, gp.z));
 
             Refresh();
-            Debug.Log("PortGraphics: " + Rows.Length + " checkbox rows and the sharpening slider are on the Graphics page; the sliders " +
-                      "moved down " + shift + " units");
         }
 
         // The smallest ancestor of a slider group (below the page) that holds

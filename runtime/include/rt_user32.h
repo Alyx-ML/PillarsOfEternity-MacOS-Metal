@@ -283,6 +283,10 @@ void rt_user32_mouse_pos(int32_t *x, int32_t *y);
    the window. pad_button: 0 left, 1 right, 2 middle. pad_wheel: one notch
    is 120. pad_key: a macOS virtual key code (kVK_*). */
 void rt_user32_pad_move(int32_t dx, int32_t dy);
+/* Put the cursor at the position (x, y) of a frame of sw x sh pixels
+   (origin top left) that covers the client area of the target window; the
+   position is limited to the client area. Main thread. */
+void rt_user32_pad_warp(int32_t x, int32_t y, int32_t sw, int32_t sh);
 void rt_user32_pad_button(int button, bool down);
 void rt_user32_pad_wheel(int32_t delta);
 void rt_user32_pad_key(uint16_t mac_keycode, bool down);

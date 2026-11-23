@@ -830,10 +830,5 @@ void rt_SetLastError(_cpu *cpu)
 void rt_OutputDebugStringW(_cpu *cpu)
 {
     uint32_t s = ARG(0);
-    char buf[2048];
-    if (s == 0) return;
-    if (rt_gstr_w(buf, sizeof(buf), s) == RT_STR_INVALID)
-        rt_log("debug: (a wide string with an unpaired surrogate)");
-    else
-        rt_log("debug: %s", buf); /* a longer string is shown in part */
+    (void)s;
 }

@@ -130,8 +130,6 @@ static rt_com_object *shader_for(D3DDevice *d, bool ps, const tokbuf *b)
     if (d->ff_shaders.count >= 256u) d3d_ff_release(d);
     o = d3d_shader_from_tokens(d, ps, b->t, b->n);
     d->ff_shaders[key] = [NSValue valueWithPointer:o];
-    rt_log("D3D9: fixed-function draw: new %s shader of %u tokens (%lu generated shaders)", ps ? "pixel" : "vertex",
-           b->n, (unsigned long)d->ff_shaders.count);
     return o;
 }
 

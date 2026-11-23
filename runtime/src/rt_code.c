@@ -96,7 +96,6 @@ void rt_code_register(const char *name, uint32_t image_base, uint32_t image_size
         atomic_store_explicit(&granule_module[i], (uint8_t)(n + 1u), memory_order_release);
     atomic_store_explicit(&nmodules, n + 1, memory_order_release);
     if (pthread_mutex_unlock(&register_lock) != 0) rt_fatal("code map unlock failed");
-    rt_log("code map of %s: %u procedures in 0x%08x-0x%08x", name, count, lo, hi);
 }
 
 /* The module whose image holds the address, or NULL. */
@@ -126,7 +125,6 @@ void rt_code_register_copy(const char *name, uint32_t template_addr, uint32_t le
     c->proc = proc;
     atomic_store_explicit(&ncopies, n + 1, memory_order_release);
     if (pthread_mutex_unlock(&register_lock) != 0) rt_fatal("code register unlock failed");
-    rt_log("code copy %s: %u bytes at 0x%08x", name, len, template_addr);
 }
 
 /* The runtime procedure for a copy of registered template code at address,
@@ -149,53 +147,6 @@ uint32_t rt_code_find(uint32_t address)
     return m->table[address - m->code_lo];
 }
 
-/* Log the state at a control transfer to an address without translated
-   code: the memory region of the address, its first bytes and the top of
-   the guest stack of the thread (return addresses). */
-static void log_bad_target(uint32_t address)
-{
-    rt_va_region r;
-    rt_thread *t = rt_self_or_null();
-    if (rt_va_query(address, &r) == 0)
-    {
-        rt_log("target region: base 0x%08x alloc 0x%08x size 0x%x state 0x%x protect 0x%x type 0x%x",
-               r.base, r.alloc_base, r.size, r.state, r.protect, r.type);
-        if (r.state == RT_MEM_COMMIT)
-        {
-            const uint8_t *b = G2H(address);
-            uint32_t n = r.base + r.size - address < 32u ? r.base + r.size - address : 32u, i;
-            char hex[3 * 32 + 1];
-            for (i = 0; i < n; i++) snprintf(hex + 3 * i, 4, "%02x ", b[i]);
-            hex[3 * n] = 0;
-            rt_log("target bytes: %s", hex);
-        }
-    }
-    if (t != NULL)
-    {
-        uint32_t sp = t->cpu->_esp, i;
-        rt_log("thread %u: esp 0x%08x ebp 0x%08x", t->tid, sp, t->cpu->_ebp);
-        for (i = 0; i < 16 && rt_va_is_committed(sp + 4u * i, 4); i++)
-        {
-            uint32_t v = rd32(sp + 4u * i);
-            rt_log("  [esp+%02x] 0x%08x%s", 4u * i, v, rt_code_find(v) != 0 ? " (procedure)" : "");
-        }
-        /* Frame chain: each frame that uses ebp keeps the ebp of the caller at
-           [ebp] and the return address at [ebp+4]. A frame that does not use
-           ebp is not in the chain. The walk stops when the chain does not go
-           up the stack. */
-        {
-            uint32_t fp = t->cpu->_ebp, n;
-            for (n = 0; n < 32 && fp > sp && rt_va_is_committed(fp, 8); n++)
-            {
-                uint32_t next = rd32(fp);
-                rt_log("  frame ebp 0x%08x return 0x%08x", fp, rd32(fp + 4u));
-                if (next <= fp) break;
-                fp = next;
-            }
-        }
-    }
-}
-
 uint32_t rt_code_target(uint32_t address)
 {
     const code_module *m = module_of(address);
@@ -210,7 +161,6 @@ uint32_t rt_code_target(uint32_t address)
     {
         uint32_t p = copy_target(address);
         if (p != 0) return p;
-        log_bad_target(address);
         rt_fatal("control transfer to 0x%08x: the address is not in a translated module or in the program", address);
     }
     return address;

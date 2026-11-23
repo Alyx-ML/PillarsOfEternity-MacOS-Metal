@@ -557,8 +557,8 @@ static void file_destroy(rt_object *o)
 {
     file_data *f = o->data;
     locks_release(f);
-    if (f->fd >= 0 && close(f->fd) != 0) rt_log("close of %s failed (%s)", f->host, strerror(errno));
-    if (f->delete_on_close && unlink(f->host) != 0) rt_log("delete on close of %s failed (%s)", f->host, strerror(errno));
+    (void)(f->fd >= 0 && close(f->fd) != 0);
+    (void)(f->delete_on_close && unlink(f->host) != 0);
     free(f);
 }
 
@@ -603,7 +603,6 @@ static void CreateFile_form(_cpu *cpu, const str_form *sf)
     if (strncmp(gp, "\\\\.\\", 4) == 0 && !(isalpha((unsigned char)gp[4]) && gp[5] == ':' && gp[6] != 0))
     {
         /* A device (\\.\name). The emulated system has no devices. */
-        rt_log("CreateFileA(\"%s\"): no such device in the emulated system", gp);
         rt_set_last_error(ERROR_FILE_NOT_FOUND);
         RET(INVALID_HANDLE_VALUE);
         return;
@@ -681,7 +680,7 @@ static void CreateFile_form(_cpu *cpu, const str_form *sf)
     if ((flags & 0x1u) && (oflags & O_CREAT) && !exists)
     {
         /* FILE_ATTRIBUTE_READONLY on a new file. */
-        if (fchmod(fd, 0444) != 0) rt_log("fchmod of %s failed (%s)", host, strerror(errno));
+        (void)(fchmod(fd, 0444) != 0);
     }
     o = rt_object_new(OBJ_FILE);
     o->data = f;
@@ -1715,7 +1714,6 @@ static void FindFirstFileEx_form(_cpu *cpu, const str_form *sf)
     {
         /* FIND_FIRST_EX_CASE_SENSITIVE: the emulated file system matches
            names without regard to case, as NTFS does by default. */
-        rt_log("FindFirstFileEx: FIND_FIRST_EX_CASE_SENSITIVE is ignored (names match without regard to case)");
     }
     FindFirstFile_form(cpu, sf, ARG(0), ARG(2));
 }
@@ -2031,7 +2029,6 @@ static void SHGetFolderPath_form(_cpu *cpu, const str_form *sf)
     const char *p = shell_folder(ARG(1) & 0xFFu);
     if (p == NULL)
     {
-        rt_log("SHGetFolderPathA: folder 0x%x is not in the emulated system", ARG(1));
         if (out != 0) sf->field(out, 1, "");
         RET(E_INVALIDARG);
         return;
@@ -2058,7 +2055,6 @@ void rt_SHGetSpecialFolderPathW(_cpu *cpu)
     const char *p = shell_folder(ARG(2) & 0xFFu);
     if (p == NULL)
     {
-        rt_log("SHGetSpecialFolderPathW: folder 0x%x is not in the emulated system", ARG(2));
         RET(0);
         return;
     }
@@ -3235,7 +3231,6 @@ static void ctrl_event_body(void *ctx, _cpu *cpu)
     for (i = n; i > 0; i--)
         if (rt_call_std(cpu, list[i - 1], 1, ev) != 0) return;
     if (ev == CTRL_C_EVENT && ignored) return;
-    rt_log("console control event %u: no handler handled it; the process ends", ev);
     rt_process_exit(STATUS_CONTROL_C_EXIT);
 }
 

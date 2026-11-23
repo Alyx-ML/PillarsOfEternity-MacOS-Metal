@@ -343,7 +343,6 @@ typedef struct d3d_stream {
     bool pass_srgb;
     uint64_t present_serial[D3D_FRAMES_IN_FLIGHT];
     uint32_t present_count;
-    bool presented; /* a frame went to a drawable (for the log) */
     /* Frame pacing when the game uses VSync (pace_interval in
        rt_d3d9_draw.m). */
     _Atomic uint64_t gpu_ns; /* GPU time of the command buffers that completed after the last Present */

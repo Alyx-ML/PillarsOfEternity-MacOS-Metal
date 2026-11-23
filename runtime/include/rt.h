@@ -22,10 +22,10 @@
 
 extern uint64_t rt_ptrofs;
 
-/* Print a message and stop the process. Used for every condition that the
-   runtime does not support; there is no fallback behavior. */
+/* Print a message to stderr and stop the process. Used for every condition
+   that the runtime does not support; there is no fallback behavior. The
+   launcher shows the message. The runtime writes no other messages. */
 _Noreturn void rt_fatal(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
-void rt_log(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 
 /* Guest address to host pointer. Guest address 0 gives NULL. */
 static inline void *G2H(uint32_t g)

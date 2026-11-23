@@ -311,8 +311,6 @@ static void bind_imports(rt_module *m, uint32_t imp_rva, uint32_t imp_size)
             e = find_import(dll, name, ordinal);
             if (e == NULL)
             {
-                if (name != NULL) rt_log("%s imports %s!%s, which the runtime does not implement", m->name, dll, name);
-                else rt_log("%s imports %s!#%u, which the runtime does not implement", m->name, dll, ordinal);
                 missing++;
                 continue;
             }
@@ -380,7 +378,7 @@ static uint32_t export_address(const rt_module *m, const char *name, uint32_t or
 static void relocate(const char *host_path, uint32_t load_base, uint32_t image_size, uint32_t rel_rva, uint32_t rel_size,
                      uint32_t delta)
 {
-    uint32_t off = 0, n = 0;
+    uint32_t off = 0;
     if (rel_rva > image_size || rel_size > image_size - rel_rva) rt_fatal("%s: bad base relocation directory", host_path);
     while (off < rel_size)
     {
@@ -396,11 +394,9 @@ static void relocate(const char *host_path, uint32_t load_base, uint32_t image_s
             if (type != 3) rt_fatal("%s: base relocation type %u is not supported", host_path, type);
             if (rva < page || rva > image_size - 4u) rt_fatal("%s: base relocation outside the image", host_path);
             wr32(load_base + rva, rd32(load_base + rva) + delta);
-            n++;
         }
         off += block;
     }
-    rt_log("%s: %u base relocations applied", host_path, n);
 }
 
 /* Map a translated PE file (see rt_module_load_pe). program: the file is
@@ -531,7 +527,6 @@ static uint32_t map_image(const char *guest_path, const char *host_path, const c
     bind_imports(m, dir_rva[1], dir_size[1]);
     loader_leave();
     rt_code_register(m->name, image_base, image_size, code_map);
-    rt_log("mapped %s at 0x%08x-0x%08x", m->path, image_base, image_base + image_size - 1);
     return image_base;
 }
 
@@ -672,7 +667,6 @@ static void load_library(_cpu *cpu, const char *buf)
 
     if (!normalize(buf, norm, sizeof(norm)) || (m = find_by_name(norm)) == NULL || m->kind == MOD_EXE)
     {
-        rt_log("LoadLibrary(\"%s\"): the DLL is not in the emulated system", buf);
         rt_set_last_error(ERROR_MOD_NOT_FOUND);
         RET(0);
         return;
@@ -1069,10 +1063,6 @@ void rt_GetProcAddress(_cpu *cpu)
         RET(addr);
         return;
     }
-    if (by_ordinal)
-        rt_log("GetProcAddress(%s, #%u): no such function in the emulated system", m->name, name);
-    else
-        rt_log("GetProcAddress(%s, \"%s\"): no such function in the emulated system", m->name, buf);
     rt_set_last_error(ERROR_PROC_NOT_FOUND);
     RET(0);
 }
@@ -1118,8 +1108,9 @@ static void suspend_other(rt_thread *t, void *ctx)
 {
     rt_thread *self = ctx;
     if (t == self) return;
-    kern_return_t kr = thread_suspend(pthread_mach_thread_np(t->pt));
-    if (kr != KERN_SUCCESS) rt_log("thread_suspend of thread %u failed (%d)", t->tid, kr);
+    /* A thread that ended already cannot be suspended; it runs no more
+       guest code. */
+    (void)thread_suspend(pthread_mach_thread_np(t->pt));
 }
 
 _Noreturn void rt_process_exit(uint32_t code)

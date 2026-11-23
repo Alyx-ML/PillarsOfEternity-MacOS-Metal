@@ -2,7 +2,7 @@
  * The converter (see rt_convert.h).
  *
  * Layout of the Recompiler directory (made by tools/package_release.sh):
- *   bin/SRW, bin/llasm, bin/opt, bin/llvm-split, bin/llvm-link, bin/clang,
+ *   bin/SRW, bin/llasm, bin/llvm-split, bin/llvm-link, bin/clang,
  *   bin/lld
  *   lib/                      the LLVM, lld, z3 and zstd libraries,
  *                             libpillars_rt.a (the runtime objects) and
@@ -42,7 +42,7 @@
  * tools/build_aot_image.sh and tools/build_aot_host.sh.
  *
  * The work is a set of units:
- *   FRONT     one module: SRW, the pin check, llasm, opt, llvm-split
+ *   FRONT     one module: SRW, the pin check, llasm, llvm-split
  *   PART      one part: llvm-link with the SSE helpers, clang
  *   COMBINE   one module: ld -r of its parts
  *   AOT_HOST  the link of the AOT compiler host (after COMBINE of mono)
@@ -53,9 +53,9 @@
  * the queue of the units other than PART comes first. A failed unit stops
  * all tool processes; the first error is the result.
  *
- * The tools run with a minimal environment, with the output of each in one
- * log file. A failed tool stops the conversion with the end of its log in
- * the error message. Intermediate files are removed when the next step no
+ * The tools run with a minimal environment. The converter reads the output
+ * of each tool into memory (it writes no log files): a failed tool stops
+ * the conversion with the end of its output in the error message. Intermediate files are removed when the next step no
  * longer needs them.
  */
 #include "rt_convert.h"
@@ -302,36 +302,21 @@ void rt_convert_cancel(void)
     pthread_mutex_unlock(&child_lock);
 }
 
-static void log_tail(const char *log, char *out, size_t n)
-{
-    FILE *f = fopen(log, "rb");
-    long end;
-    size_t got;
-    out[0] = 0;
-    if (f == NULL || n < 2) goto done;
-    if (fseek(f, 0, SEEK_END) != 0 || (end = ftell(f)) < 0) goto done;
-    if (end > LOG_TAIL && fseek(f, end - LOG_TAIL, SEEK_SET) != 0) goto done;
-    if (end <= LOG_TAIL && fseek(f, 0, SEEK_SET) != 0) goto done;
-    got = fread(out, 1, n - 1, f);
-    out[got] = 0;
-done:
-    if (f != NULL) fclose(f);
-}
-
 /* Run tool with argv (argv[0] is set to the tool path) in cwd and wait for
-   it. The standard output and the standard error go to log. A tool that
-   fails (or, with quiet, writes any output) is an error. */
-static bool run_tool(wk *w, const char *what, const char *tool, const char **argv, const char *cwd, const char *log,
-                     bool quiet)
+   it. The standard output and the standard error go to a pipe; the last
+   LOG_TAIL bytes stay in memory for the error message. A tool that fails
+   (or, with quiet, writes any output) is an error. */
+static bool run_tool(wk *w, const char *what, const char *tool, const char **argv, const char *cwd, bool quiet)
 {
     posix_spawn_file_actions_t fa;
     posix_spawnattr_t attr;
-    char env_home[PATH_LEN + 8], env_tmp[PATH_LEN + 8], tail[LOG_TAIL + 1];
+    char env_home[PATH_LEN + 8], env_tmp[PATH_LEN + 8], tail[LOG_TAIL + 1], chunk[4096];
     const char *home = getenv("HOME");
     char *envp[5];
-    int n = 0, r, status = 0;
+    int n = 0, r, status = 0, fd[2];
+    size_t kept = 0, total = 0;
+    ssize_t got_bytes;
     pid_t pid, got;
-    struct stat st;
 
     if (atomic_load(&cancelled)) return fail(w, "the conversion was cancelled");
     envp[n++] = (char *)"PATH=/usr/bin:/bin";
@@ -344,40 +329,72 @@ static bool run_tool(wk *w, const char *what, const char *tool, const char **arg
     envp[n] = NULL;
     argv[0] = tool;
 
-    if (posix_spawn_file_actions_init(&fa) != 0) return fail(w, "posix_spawn_file_actions_init failed");
+    if (pipe(fd) != 0) return fail(w, "pipe failed: %s", strerror(errno));
+    if (posix_spawn_file_actions_init(&fa) != 0)
+    {
+        close(fd[0]);
+        close(fd[1]);
+        return fail(w, "posix_spawn_file_actions_init failed");
+    }
     if (posix_spawnattr_init(&attr) != 0)
     {
         posix_spawn_file_actions_destroy(&fa);
+        close(fd[0]);
+        close(fd[1]);
         return fail(w, "posix_spawnattr_init failed");
     }
     r = posix_spawn_file_actions_addchdir_np(&fa, cwd);
     if (r == 0) r = posix_spawn_file_actions_addopen(&fa, 0, "/dev/null", O_RDONLY, 0);
-    if (r == 0) r = posix_spawn_file_actions_addopen(&fa, 1, log, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-    if (r == 0) r = posix_spawn_file_actions_adddup2(&fa, 1, 2);
+    if (r == 0) r = posix_spawn_file_actions_adddup2(&fa, fd[1], 1);
+    if (r == 0) r = posix_spawn_file_actions_adddup2(&fa, fd[1], 2);
     /* Only the descriptors 0, 1 and 2 go to the tool. */
     if (r == 0) r = posix_spawnattr_setflags(&attr, POSIX_SPAWN_CLOEXEC_DEFAULT);
     if (r == 0) r = posix_spawn(&pid, tool, &fa, &attr, (char *const *)argv, envp);
     posix_spawn_file_actions_destroy(&fa);
     posix_spawnattr_destroy(&attr);
-    if (r != 0) return fail(w, "cannot start %s: %s", tool, strerror(r));
+    close(fd[1]);
+    if (r != 0)
+    {
+        close(fd[0]);
+        return fail(w, "cannot start %s: %s", tool, strerror(r));
+    }
     register_child(pid);
+    /* Read until the tool closes its output; keep the last LOG_TAIL bytes. */
+    for (;;)
+    {
+        got_bytes = read(fd[0], chunk, sizeof chunk);
+        if (got_bytes < 0 && errno == EINTR) continue;
+        if (got_bytes <= 0) break;
+        total += (size_t)got_bytes;
+        if ((size_t)got_bytes >= LOG_TAIL)
+        {
+            memcpy(tail, chunk + (size_t)got_bytes - LOG_TAIL, LOG_TAIL);
+            kept = LOG_TAIL;
+        }
+        else
+        {
+            size_t add = (size_t)got_bytes, drop = kept + add > LOG_TAIL ? kept + add - LOG_TAIL : 0;
+            memmove(tail, tail + drop, kept - drop);
+            kept -= drop;
+            memcpy(tail + kept, chunk, add);
+            kept += add;
+        }
+    }
+    r = got_bytes < 0 ? errno : 0;
+    close(fd[0]);
+    tail[kept] = 0;
     do got = waitpid(pid, &status, 0);
     while (got < 0 && errno == EINTR);
     unregister_child(pid);
     if (got != pid) return fail(w, "waitpid for %s failed: %s", what, strerror(errno));
     if (atomic_load(&cancelled)) return fail(w, "the conversion was cancelled");
+    if (r != 0) return fail(w, "the output of %s cannot be read: %s", what, strerror(r));
     if (!WIFEXITED(status) || WEXITSTATUS(status) != 0)
     {
-        log_tail(log, tail, sizeof tail);
-        if (WIFSIGNALED(status))
-            return fail(w, "%s stopped with signal %d. The end of %s:\n%s", what, WTERMSIG(status), log, tail);
-        return fail(w, "%s failed with status %d. The end of %s:\n%s", what, WEXITSTATUS(status), log, tail);
+        if (WIFSIGNALED(status)) return fail(w, "%s stopped with signal %d. The end of its output:\n%s", what, WTERMSIG(status), tail);
+        return fail(w, "%s failed with status %d. The end of its output:\n%s", what, WEXITSTATUS(status), tail);
     }
-    if (quiet && stat(log, &st) == 0 && st.st_size > 0)
-    {
-        log_tail(log, tail, sizeof tail);
-        return fail(w, "%s wrote messages (the tested build had none). The end of %s:\n%s", what, log, tail);
-    }
+    if (quiet && total > 0) return fail(w, "%s wrote messages (the tested build had none). The end of its output:\n%s", what, tail);
     return true;
 }
 
@@ -665,6 +682,28 @@ static bool remove_file(wk *w, const char *path)
     return true;
 }
 
+/* Append text to the file at path. */
+static bool append_text(wk *w, const char *path, const char *text)
+{
+    size_t len = strlen(text), done = 0;
+    int fd = open(path, O_WRONLY | O_APPEND | O_CLOEXEC);
+    if (fd < 0) return fail(w, "%s cannot be opened: %s", path, strerror(errno));
+    while (done < len)
+    {
+        ssize_t n = write(fd, text + done, len - done);
+        if (n < 0 && errno == EINTR) continue;
+        if (n <= 0)
+        {
+            int e = errno;
+            (void)close(fd);
+            return fail(w, "%s cannot be written: %s", path, n < 0 ? strerror(e) : "no progress");
+        }
+        done += (size_t)n;
+    }
+    if (close(fd) != 0) return fail(w, "%s cannot be closed: %s", path, strerror(errno));
+    return true;
+}
+
 static bool remove_in(wk *w, const char *dir, const char *name)
 {
     char p[PATH_LEN];
@@ -901,11 +940,11 @@ static bool check_pins(wk *w, const module *m)
     return true;
 }
 
-/* FRONT: the SRW input, SRW, the pin check, llasm, opt, llvm-split. */
+/* FRONT: the SRW input, SRW, the pin check, llasm, llvm-split. */
 static bool unit_front(wk *w, module *m)
 {
-    char src[PATH_LEN], dst[PATH_LEN], tool[PATH_LEN], log[PATH_LEN], inc1[PATH_LEN], inc2[PATH_LEN], map_opt[128],
-        llasm_name[96], ll_name[96], bc_name[96], parts_dir[PATH_LEN], prefix[128], jobs_arg[16];
+    char src[PATH_LEN], dst[PATH_LEN], tool[PATH_LEN], inc1[PATH_LEN], inc2[PATH_LEN], map_opt[128],
+        llasm_name[96], ll_name[96], parts_dir[PATH_LEN], prefix[128], jobs_arg[16];
     const char *argv[24];
     unsigned i, nfiles;
 
@@ -929,9 +968,8 @@ static bool unit_front(wk *w, module *m)
     /* SRW: the address-preserving pass of tools/translate_module.sh. */
     snprintf(llasm_name, sizeof llasm_name, "%s.llasm", m->name);
     snprintf(ll_name, sizeof ll_name, "%s.ll", m->name);
-    snprintf(bc_name, sizeof bc_name, "%s.bc", m->name);
     snprintf(map_opt, sizeof map_opt, "--preserve_addresses=%s_code_map", m->name);
-    if (!tool_path(w, tool, "bin/SRW") || !join(log, sizeof log, m->dir, "srw.log")) return false;
+    if (!tool_path(w, tool, "bin/SRW")) return false;
     i = 1;
     if (m->kind == MOD_AOT)
     {
@@ -942,12 +980,12 @@ static bool unit_front(wk *w, module *m)
     argv[i++] = m->srw_input;
     argv[i++] = llasm_name;
     argv[i] = NULL;
-    if (!run_tool(w, "SRW", tool, argv, m->dir, log, false)) return false;
+    if (!run_tool(w, "SRW", tool, argv, m->dir, false)) return false;
     if (!check_pins(w, m)) return false;
     if (m->kind == MOD_PE && !remove_in(w, m->dir, m->srw_input)) return false;
 
     /* llasm with the options of tools/translate_module.sh. */
-    if (!tool_path(w, tool, "bin/llasm") || !join(log, sizeof log, m->dir, "llasm.log") ||
+    if (!tool_path(w, tool, "bin/llasm") ||
         !tool_path(w, inc1, "include/llasm-support") || !tool_path(w, inc2, "include/runtime"))
         return false;
     i = 1;
@@ -967,37 +1005,34 @@ static bool unit_front(wk *w, module *m)
     argv[i++] = "-o";
     argv[i++] = ll_name;
     argv[i] = NULL;
-    if (!run_tool(w, "llasm", tool, argv, m->dir, log, false)) return false;
+    if (!run_tool(w, "llasm", tool, argv, m->dir, false)) return false;
     if (!remove_in(w, m->dir, llasm_name)) return false;
     for (i = 0; i < w->mf->npins; i++)
         if (strcmp(w->mf->pins[i].module, m->name) == 0 && strcmp(w->mf->pins[i].file, llasm_name) != 0 &&
             !remove_in(w, m->dir, w->mf->pins[i].file))
             return false;
 
-    /* opt: target, data layout, IR verifier, bitcode. */
-    if (!tool_path(w, tool, "bin/opt") || !join(log, sizeof log, m->dir, "opt.log")) return false;
-    argv[1] = "--mtriple=" TRIPLE;
-    argv[2] = "--data-layout=" DATALAYOUT;
-    argv[3] = ll_name;
-    argv[4] = "-o";
-    argv[5] = bc_name;
-    argv[6] = NULL;
-    if (!run_tool(w, "opt", tool, argv, m->dir, log, true)) return false;
-    if (!remove_in(w, m->dir, ll_name)) return false;
+    /* The target and the data layout go at the end of the module (LLVM
+       assembly allows them anywhere at the top level). llvm-split then
+       reads the text directly: the module is parsed once, not three times
+       (opt to bitcode, then llvm-split), on the longest path of the
+       conversion. */
+    if (!fmt_path(src, sizeof src, "%s/%s", m->dir, ll_name)) return fail(w, "a path is too long");
+    if (!append_text(w, src, "\ntarget datalayout = \"" DATALAYOUT "\"\ntarget triple = \"" TRIPLE "\"\n")) return false;
 
     /* llvm-split into parts/<module>0 ... parts/<module>N-1. */
     if (!join(parts_dir, sizeof parts_dir, m->dir, "parts") || !make_dir(w, parts_dir)) return false;
-    if (!tool_path(w, tool, "bin/llvm-split") || !join(log, sizeof log, m->dir, "split.log")) return false;
+    if (!tool_path(w, tool, "bin/llvm-split")) return false;
     snprintf(jobs_arg, sizeof jobs_arg, "%u", m->parts);
     snprintf(prefix, sizeof prefix, "parts/%s", m->name);
     argv[1] = "-j";
     argv[2] = jobs_arg;
-    argv[3] = bc_name;
+    argv[3] = ll_name;
     argv[4] = "-o";
     argv[5] = prefix;
     argv[6] = NULL;
-    if (!run_tool(w, "llvm-split", tool, argv, m->dir, log, true)) return false;
-    if (!remove_in(w, m->dir, bc_name)) return false;
+    if (!run_tool(w, "llvm-split", tool, argv, m->dir, true)) return false;
+    if (!remove_in(w, m->dir, ll_name)) return false;
     for (i = 0; i < m->parts; i++)
     {
         struct stat st;
@@ -1012,7 +1047,7 @@ static bool unit_front(wk *w, module *m)
    compiles the part (tools/compile_module.sh). */
 static bool unit_part(wk *w, module *m, unsigned part)
 {
-    char parts_dir[PATH_LEN], in[PATH_LEN], sse[PATH_LEN], obj[PATH_LEN], log[PATH_LEN], tool[PATH_LEN],
+    char parts_dir[PATH_LEN], in[PATH_LEN], sse[PATH_LEN], obj[PATH_LEN], tool[PATH_LEN],
         sse_bc[PATH_LEN];
     const char *argv[NCC1 + 8];
     unsigned k;
@@ -1021,7 +1056,6 @@ static bool unit_part(wk *w, module *m, unsigned part)
         !fmt_path(in, sizeof in, "%s/%s%u", parts_dir, m->name, part) ||
         !fmt_path(sse, sizeof sse, "%s/%s%u.sse.bc", parts_dir, m->name, part) ||
         !fmt_path(obj, sizeof obj, "%s/%s%u.o", parts_dir, m->name, part) ||
-        !fmt_path(log, sizeof log, "%s/%s%u.log", parts_dir, m->name, part) ||
         !tool_path(w, sse_bc, "include/llasm-support/sse_inline.bc") || !tool_path(w, tool, "bin/llvm-link"))
         return fail(w, "a path is too long");
     argv[1] = "--only-needed";
@@ -1031,7 +1065,7 @@ static bool unit_part(wk *w, module *m, unsigned part)
     argv[5] = "-o";
     argv[6] = sse;
     argv[7] = NULL;
-    if (!run_tool(w, "llvm-link", tool, argv, parts_dir, log, true)) return false;
+    if (!run_tool(w, "llvm-link", tool, argv, parts_dir, true)) return false;
     if (!remove_file(w, in)) return false;
     if (!tool_path(w, tool, "bin/clang")) return false;
     for (k = 0; k < NCC1; k++) argv[1 + k] = cc1_args[k];
@@ -1041,8 +1075,8 @@ static bool unit_part(wk *w, module *m, unsigned part)
     argv[4 + NCC1] = "ir";
     argv[5 + NCC1] = sse;
     argv[6 + NCC1] = NULL;
-    if (!run_tool(w, "clang", tool, argv, parts_dir, log, true)) return false;
-    return remove_file(w, sse) && remove_file(w, log);
+    if (!run_tool(w, "clang", tool, argv, parts_dir, true)) return false;
+    return remove_file(w, sse);
 }
 
 static int cmp_str(const void *a, const void *b)
@@ -1055,7 +1089,7 @@ static int cmp_str(const void *a, const void *b)
    name). */
 static bool unit_combine(wk *w, module *m)
 {
-    char (*names)[96], (*paths)[PATH_LEN], parts_dir[PATH_LEN], log[PATH_LEN], sym1[96];
+    char (*names)[96], (*paths)[PATH_LEN], parts_dir[PATH_LEN], sym1[96];
     const char **argv;
     unsigned i, k;
     bool ok;
@@ -1070,7 +1104,7 @@ static bool unit_combine(wk *w, module *m)
         free(argv);
         return fail(w, "out of memory");
     }
-    ok = join(parts_dir, sizeof parts_dir, m->dir, "parts") && join(log, sizeof log, m->dir, "combine.log");
+    ok = join(parts_dir, sizeof parts_dir, m->dir, "parts");
     for (i = 0; ok && i < m->parts; i++) snprintf(names[i], sizeof names[i], "%s%u", m->name, i);
     qsort(names, m->parts, sizeof *names, cmp_str);
     for (i = 0; ok && i < m->parts; i++) ok = fmt_path(paths[i], PATH_LEN, "%s/%s.o", parts_dir, names[i]);
@@ -1095,7 +1129,7 @@ static bool unit_combine(wk *w, module *m)
         argv[k++] = "_ptr_initialize_pointers";
     }
     argv[k] = NULL;
-    ok = run_tool(w, "ld -r", w->job->tools->ld, argv, m->dir, log, false);
+    ok = run_tool(w, "ld -r", w->job->tools->ld, argv, m->dir, false);
     if (ok) ok = remove_tree(w, parts_dir);
     free(names);
     free(paths);
@@ -1109,7 +1143,7 @@ static bool unit_combine(wk *w, module *m)
 static bool link_program(wk *w, bool player, const char *out)
 {
     char obj_dir[PATH_LEN], guest[PATH_LEN], images[PATH_LEN], host_main[PATH_LEN], rtlib[PATH_LEN], crt[PATH_LEN],
-        log[PATH_LEN], tmp[PATH_LEN], codesign_log[PATH_LEN], plist[PATH_LEN];
+        tmp[PATH_LEN], plist[PATH_LEN];
     const char **argv;
     const char *cs[8];
     unsigned k, i;
@@ -1119,14 +1153,16 @@ static bool link_program(wk *w, bool player, const char *out)
         !join(images, sizeof images, obj_dir, player ? "aot_images_player.o" : "aot_images_aot.o") ||
         !join(host_main, sizeof host_main, obj_dir, player ? "player_main.o" : "aot_main.o") ||
         !tool_path(w, rtlib, "lib/libpillars_rt.a") || !tool_path(w, crt, "lib/libclang_rt.osx.a") ||
-        !fmt_path(log, sizeof log, "%s/link_%s.log", w->job->work_dir, player ? "player" : "aot") ||
-        !fmt_path(codesign_log, sizeof codesign_log, "%s/codesign_%s.log", w->job->work_dir, player ? "player" : "aot") ||
         !join(plist, sizeof plist, obj_dir, "player_info.plist") || !fmt_path(tmp, sizeof tmp, "%s.tmp", out))
         return fail(w, "a path is too long");
     argv = calloc(w->mf->nmodules + NLINK_LIBS + 48, sizeof *argv);
     if (argv == NULL) return fail(w, "out of memory");
     k = ld_base_args(w->job->tools, argv);
     argv[k++] = "-dynamic";
+    /* The player has millions of local symbols of the translated code
+       (about 110 MB); nothing reads them at run time (rt_mem.c uses dladdr
+       only for the image base). */
+    if (player) argv[k++] = "-x";
     argv[k++] = "-o";
     argv[k++] = tmp;
     argv[k++] = guest;
@@ -1179,7 +1215,7 @@ static bool link_program(wk *w, bool player, const char *out)
     argv[k] = NULL;
     unlink(tmp);
     ok = run_tool(w, player ? "the link of the game" : "the link of the AOT compiler", w->job->tools->ld, argv,
-                  w->job->work_dir, log, false);
+                  w->job->work_dir, false);
     free(argv);
     if (!ok) return false;
     cs[1] = "--force";
@@ -1187,7 +1223,7 @@ static bool link_program(wk *w, bool player, const char *out)
     cs[3] = "-";
     cs[4] = tmp;
     cs[5] = NULL;
-    if (!run_tool(w, "codesign", "/usr/bin/codesign", cs, w->job->work_dir, codesign_log, false)) return false;
+    if (!run_tool(w, "codesign", "/usr/bin/codesign", cs, w->job->work_dir, false)) return false;
     if (rename(tmp, out) != 0) return fail(w, "cannot rename %s: %s", tmp, strerror(errno));
     return true;
 }
@@ -1202,7 +1238,7 @@ static bool aot_host_path(wk *w, char *out)
    check of the image. */
 static bool unit_aot(wk *w, module *m)
 {
-    char run[PATH_LEN], user[PATH_LEN], aot_dir[PATH_LEN], src[PATH_LEN], dst[PATH_LEN], host[PATH_LEN], log[PATH_LEN],
+    char run[PATH_LEN], user[PATH_LEN], aot_dir[PATH_LEN], src[PATH_LEN], dst[PATH_LEN], host[PATH_LEN],
         aot_opt[512], source[256], out_s[PATH_LEN], image_s[PATH_LEN], exports[PATH_LEN], tool[PATH_LEN], base_opt[32],
         lib[PATH_LEN];
     const char *argv[24];
@@ -1227,7 +1263,7 @@ static bool unit_aot(wk *w, module *m)
             return fail(w, "a path is too long");
         if (!copy_file(w, src, dst)) return false;
     }
-    if (!aot_host_path(w, host) || !join(log, sizeof log, m->dir, "aot.log")) return false;
+    if (!aot_host_path(w, host)) return false;
     if (!fmt_path(aot_opt, sizeof aot_opt, "--aot=full,asmonly,asmwriter,nodebug%s%s,outfile=" GUEST_USER_AOT "%s.s",
                   m->options[0] != 0 ? "," : "", m->options, m->srw_input) ||
         !fmt_path(source, sizeof source, "%s%s.dll", m->port ? GUEST_USER_AOT : GUEST_MANAGED, m->assembly))
@@ -1239,7 +1275,7 @@ static bool unit_aot(wk *w, module *m)
     argv[5] = aot_opt;
     argv[6] = source;
     argv[7] = NULL;
-    if (!run_tool(w, "the AOT compiler", host, argv, m->dir, log, false)) return false;
+    if (!run_tool(w, "the AOT compiler", host, argv, m->dir, false)) return false;
 
     /* The image (tools/build_aot_image.sh). */
     if (!fmt_path(out_s, sizeof out_s, "%s/%s.s", aot_dir, m->srw_input) || !join(image_s, sizeof image_s, m->dir, "image.s") ||
@@ -1247,7 +1283,7 @@ static bool unit_aot(wk *w, module *m)
         return fail(w, "a path is too long");
     if (!rt_aot_asm_convert(out_s, image_s, exports, &st, w->err, sizeof w->err)) return false;
     if (!remove_tree(w, run)) return false;
-    if (!tool_path(w, tool, "bin/clang") || !join(log, sizeof log, m->dir, "assemble.log")) return false;
+    if (!tool_path(w, tool, "bin/clang")) return false;
     i = 1;
     argv[i++] = "-cc1as";
     argv[i++] = "-triple";
@@ -1264,9 +1300,9 @@ static bool unit_aot(wk *w, module *m)
     argv[i++] = "image.obj";
     argv[i++] = "image.s";
     argv[i] = NULL;
-    if (!run_tool(w, "the assembler", tool, argv, m->dir, log, true)) return false;
+    if (!run_tool(w, "the assembler", tool, argv, m->dir, true)) return false;
     if (!remove_file(w, image_s)) return false;
-    if (!tool_path(w, tool, "bin/lld") || !join(log, sizeof log, m->dir, "lld-link.log")) return false;
+    if (!tool_path(w, tool, "bin/lld")) return false;
     snprintf(base_opt, sizeof base_opt, "/base:%s", m->base);
     if (!fmt_path(dst, sizeof dst, "/out:%s", m->srw_input)) return fail(w, "a path is too long");
     i = 1;
@@ -1283,7 +1319,7 @@ static bool unit_aot(wk *w, module *m)
     argv[i++] = dst;
     argv[i++] = "image.obj";
     argv[i] = NULL;
-    if (!run_tool(w, "lld-link", tool, argv, m->dir, log, true)) return false;
+    if (!run_tool(w, "lld-link", tool, argv, m->dir, true)) return false;
     /* lld-link also writes the import library <image without .dll>.lib. */
     if (!fmt_path(lib, sizeof lib, "%s/%s.dll.lib", m->dir, m->assembly))
         return fail(w, "a path is too long");

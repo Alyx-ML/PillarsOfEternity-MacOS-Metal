@@ -366,10 +366,8 @@ static id<MTLLibrary> compile_library(D3DDevice *d, NSString *src, const char *w
     id<MTLLibrary> lib = [d->mtl newLibraryWithSource:src options:o error:&err];
     if (lib == nil)
     {
-        rt_log("D3D9: Metal source of %s:\n%s", what, src.UTF8String);
         rt_fatal("D3D9: Metal compile of %s failed: %s", what, err.localizedDescription.UTF8String);
     }
-    if (err != nil) rt_log("D3D9: Metal compile of %s: %s", what, err.localizedDescription.UTF8String);
     return lib;
 }
 
@@ -554,8 +552,6 @@ static id<MTLTexture> ds_twin(D3DDevice *d, D3DSurface *s, uint32_t samples)
         /* The single-sample storage has the content of the surface if a
            pass or a clear used it. */
         s->twin_state = s->last_use != 0 ? 2 : 0;
-        rt_log("D3D9: port MSAA: the depth-stencil surface %ux%u (format 0x%x) has %u-sample storage for the back buffer",
-               s->width, s->height, s->fmt, samples);
     }
     return s->ms_twin;
 }
@@ -760,27 +756,15 @@ static void begin_pass(D3DDevice *d)
                The pass gets no depth-stencil attachment, so depth and
                stencil tests are off and a pending depth or stencil clear
                has no effect (NVIDIA behavior in the same test). */
-            static bool logged;
-            if (!logged)
-                rt_log("D3D9: the depth-stencil surface (%lu samples) and the render target (%u samples) differ in "
-                       "sample count; the pass draws without the depth-stencil surface",
-                       (unsigned long)t.sampleCount, samples);
-            logged = true;
             goto no_ds;
         }
         if (s->width * d3d_surface_scale(s) < w || s->height * d3d_surface_scale(s) < h)
             rt_fatal("D3D9: the depth-stencil surface (%ux%u, %u Metal pixels per pixel) is smaller in Metal pixels "
                      "than the render target (%ux%u Metal pixels)",
                      s->width, s->height, d3d_surface_scale(s), w, h);
-        if (d3d_surface_scale(s) != scale)
-        {
-            static bool logged_scale;
-            if (!logged_scale)
-                rt_log("D3D9: a supersampled shadow depth-stencil surface (%ux%u) is used with a render target that "
-                       "is not supersampled; the pass uses the top-left part of its Metal storage",
-                       s->width, s->height);
-            logged_scale = true;
-        }
+        /* A supersampled shadow depth-stencil surface with a render target
+           that is not supersampled: the pass uses the top-left part of
+           its Metal storage. */
         rp.depthAttachment.texture = t;
         rp.depthAttachment.slice = slice;
         rp.depthAttachment.level = level;
@@ -844,11 +828,10 @@ static void need_pass(D3DDevice *d)
 
 /* ---------------------------------------------------------------- caches */
 
-static void cache_limit(NSMutableDictionary *dict, NSUInteger max, const char *what)
+static void cache_limit(NSMutableDictionary *dict, NSUInteger max)
 {
     if (dict.count >= max)
     {
-        rt_log("D3D9: %s cache is full (%lu entries); it is emptied", what, (unsigned long)dict.count);
         [dict removeAllObjects];
     }
 }
@@ -931,7 +914,6 @@ static void state_cache_put(D3DStateCache *c, const void *key, id obj)
     uint32_t i, e;
     if (c->count >= c->limit)
     {
-        rt_log("D3D9: %s cache is full (%u entries); it is emptied", c->name, c->count);
         for (e = 0; e < c->count; e++) CFRelease(c->objs[e]);
         memset(c->slots, 0, ((size_t)c->mask + 1u) * sizeof *c->slots);
         c->count = 0;
@@ -1102,7 +1084,7 @@ static id<MTLFunction> ps_function(D3DDevice *d, D3DShader *ps, D3DShader *vs, u
         f = function_of(compile_library(d, src, "a pixel shader"), "ps_main");
     }
     d3dsh_text_free(&t);
-    cache_limit(ps->ps_funcs, MAX_PS_VARIANTS, "pixel shader variant");
+    cache_limit(ps->ps_funcs, MAX_PS_VARIANTS);
     ps->ps_funcs[key] = f;
     return f;
     }
@@ -1687,7 +1669,6 @@ static struct
     uint32_t n;
     bool *started;
     uint32_t total; /* recipes in the file, with the new ones */
-    bool full_logged;
     NSMutableSet<NSData *> *known;                                     /* recipe bytes */
     NSMutableDictionary<NSData *, NSMutableArray<NSNumber *> *> *by_obj; /* shader hash or declaration -> recipes */
     NSMapTable<NSData *, D3DShader *> *shaders;                         /* hash -> live shader */
@@ -1754,7 +1735,6 @@ void rt_d3d9_pipeline_cache_init(const char *path)
         if (pc.f == NULL) rt_fatal("D3D9: the pipeline cache %s cannot be created: %s", pc.path, strerror(errno));
         pc_write_header();
         pc.ready = true;
-        rt_log("D3D9: pipeline cache %s is new", pc.path);
         return;
     }
     if (fseek(pc.f, 0, SEEK_END) != 0 || (size = ftell(pc.f)) < 0 || fseek(pc.f, 0, SEEK_SET) != 0)
@@ -1762,7 +1742,6 @@ void rt_d3d9_pipeline_cache_init(const char *path)
     if ((size_t)size < sizeof h || fread(h, sizeof h, 1, pc.f) != 1 || h[0] != PCACHE_MAGIC || h[1] != PCACHE_VERSION ||
         h[2] != sizeof(pc_recipe))
     {
-        rt_log("D3D9: pipeline cache %s is from a different runtime version; it starts again", pc.path);
         if (ftruncate(fileno(pc.f), 0) != 0 || fseek(pc.f, 0, SEEK_SET) != 0)
             rt_fatal("D3D9: the pipeline cache %s cannot be cleared: %s", pc.path, strerror(errno));
         pc_write_header();
@@ -1780,7 +1759,6 @@ void rt_d3d9_pipeline_cache_init(const char *path)
             rt_fatal("D3D9: the pipeline cache %s cannot be read: %s", pc.path, strerror(errno));
         if ((size_t)size != whole)
         {
-            rt_log("D3D9: pipeline cache %s: the last recipe is not complete; it is removed", pc.path);
             if (ftruncate(fileno(pc.f), (off_t)whole) != 0)
                 rt_fatal("D3D9: the pipeline cache %s cannot be truncated: %s", pc.path, strerror(errno));
         }
@@ -1798,7 +1776,6 @@ void rt_d3d9_pipeline_cache_init(const char *path)
     pc.total = pc.n;
     if (fseek(pc.f, 0, SEEK_END) != 0) rt_fatal("D3D9: the pipeline cache %s cannot be read: %s", pc.path, strerror(errno));
     pc.ready = true;
-    rt_log("D3D9: pipeline cache %s: %u recipes", pc.path, pc.n);
 }
 
 /* The pipeline of the recipe on a pipeline cache thread. */
@@ -1913,9 +1890,6 @@ static id<MTLRenderPipelineState> pcache_take(const pipe_key *k)
     }
     else
         pc.n_used++;
-    if ((pc.n_used + pc.n_back) % 64u == 1u)
-        rt_log("D3D9: pipeline cache: %u builds queued, %u built in the background, %u used, %u taken back by the draw",
-               pc.n_queued, pc.n_built, pc.n_used, pc.n_back);
     pc_unlock();
     return v;
 }
@@ -1938,8 +1912,7 @@ static void pcache_record(const pipe_key *k, const D3DShader *vs, const D3DShade
     {
         if (pc.total >= PCACHE_MAX)
         {
-            if (!pc.full_logged) rt_log("D3D9: the pipeline cache has %u recipes; no more are recorded", PCACHE_MAX);
-            pc.full_logged = true;
+            /* The cache file is full: no more recipes are recorded. */
         }
         else
         {
@@ -2059,23 +2032,14 @@ static bool port_sampler_ok(D3DDevice *d, const D3DShader *ps, uint16_t as_2d, u
 
 static uint32_t port_variant(D3DDevice *d, const D3DShader *ps, uint16_t as_2d)
 {
-    static bool pcf_logged, easu_logged; /* render thread only */
     if (memcmp(ps->hash, shadow_ps_hash, sizeof shadow_ps_hash) == 0)
     {
         if (rt_portgfx_get(RT_GFX_SOFT_SHADOWS) == 0 || !port_sampler_ok(d, ps, as_2d, 1)) return 0;
-        if (!pcf_logged)
-            rt_log("D3D9: soft shadows: %d-tap filtered lookup in shader %u, shadow map %u x %u", D3DSH_PCF_TAPS,
-                   ps->id, d3d_tex(d->tex[1])->width, d3d_tex(d->tex[1])->height);
-        pcf_logged = true;
         return 1u + 1u;
     }
     if (memcmp(ps->hash, background_ps_hash, sizeof background_ps_hash) == 0)
     {
         if (rt_portgfx_get(RT_GFX_SHARP_BACKGROUNDS) == 0 || !port_sampler_ok(d, ps, as_2d, 3)) return 0;
-        if (!easu_logged)
-            rt_log("D3D9: sharper backgrounds: EASU magnification in shader %u, tile %u x %u", ps->id,
-                   d3d_tex(d->tex[3])->width, d3d_tex(d->tex[3])->height);
-        easu_logged = true;
         return (1u + 3u) << 8;
     }
     return 0;
@@ -3008,6 +2972,170 @@ void rt_com_D3DDevice9_ColorFill(_cpu *cpu)
 
 /* ---------------------------------------------------------------- present */
 
+/* ---------------------------------------------------------------- screenshots */
+
+/* rt_d3d9_request_screenshot (F12, the Share button of a controller): the
+   next presented frame is also drawn into an SDR image with the present
+   shader (hdr 0: the image of an SDR screen, with the gamma ramp of the
+   game, at the size of the frame on the screen and without the cursor).
+   The GPU copies the image to a shared buffer in the command buffer of the
+   frame; when the command buffer completes, a background queue converts
+   it to 8-bit sRGB and writes a PNG file to the screenshot folder of macOS
+   (the "location" value of com.apple.screencapture, as set in the
+   Screenshot application; the Desktop when it is not set). The name has
+   the form "Pillars of Eternity 2026-11-23 at 21.40.12.png", as the
+   screenshots of macOS. A request while a screenshot is not written yet
+   has no effect, so at most one image is in memory. When the file is
+   written, the shutter sound of macOS plays (not in headless or muted
+   runs); when it cannot be written, the alert sound of macOS plays and no
+   file is made. */
+static atomic_bool shot_requested, shot_busy;
+static dispatch_queue_t shot_queue;
+
+void rt_d3d9_request_screenshot(void)
+{
+    if (!atomic_load(&shot_busy)) atomic_store(&shot_requested, true);
+}
+
+static NSString *screenshot_folder(void)
+{
+    CFPropertyListRef v = CFPreferencesCopyAppValue(CFSTR("location"), CFSTR("com.apple.screencapture"));
+    NSString *dir = nil;
+    if (v != NULL && CFGetTypeID(v) == CFStringGetTypeID()) dir = [(__bridge NSString *)v stringByExpandingTildeInPath];
+    if (v != NULL) CFRelease(v);
+    if (dir.length == 0) dir = [NSHomeDirectory() stringByAppendingPathComponent:@"Desktop"];
+    return dir;
+}
+
+static void screenshot_feedback(bool ok)
+{
+    dispatch_async(dispatch_get_main_queue(), ^{
+      if (!ok)
+      {
+          NSBeep();
+          return;
+      }
+      if (rt_cocoa_headless() || rt_audio_muted()) return;
+      {
+          NSSound *snd = [[NSSound alloc]
+              initWithContentsOfFile:@"/System/Library/Components/CoreAudio.component/Contents/SharedSupport/SystemSounds/system/Screen Capture.aif"
+                         byReference:YES];
+          [snd play];
+      }
+    });
+}
+
+/* Background queue: the RGBA16Float pixels (linear BT.2020, the SDR output
+   of the present shader) to an sRGB PNG file. Returns false if the file
+   cannot be made. */
+static bool screenshot_write(id<MTLBuffer> buf, NSUInteger w, NSUInteger h)
+{
+    CGColorSpaceRef lin = CGColorSpaceCreateWithName(kCGColorSpaceLinearITUR_2020);
+    CGColorSpaceRef srgb = CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
+    CGDataProviderRef dp = CGDataProviderCreateWithData(NULL, buf.contents, w * h * 8u, NULL);
+    CGImageRef src = NULL, out = NULL;
+    CGContextRef cx = NULL;
+    CGImageDestinationRef dst = NULL;
+    NSString *dir = screenshot_folder(), *path = nil, *stamp;
+    NSDateFormatter *df = [NSDateFormatter new];
+    bool ok = false;
+    unsigned i;
+    if (lin == NULL || srgb == NULL || dp == NULL) goto done;
+    src = CGImageCreate(w, h, 16, 64, w * 8u, lin,
+                        kCGBitmapByteOrder16Little | kCGBitmapFloatComponents | (CGBitmapInfo)kCGImageAlphaNoneSkipLast, dp,
+                        NULL, false, kCGRenderingIntentDefault);
+    cx = CGBitmapContextCreate(NULL, w, h, 8, 0, srgb, kCGBitmapByteOrder32Big | (CGBitmapInfo)kCGImageAlphaNoneSkipLast);
+    if (src == NULL || cx == NULL) goto done;
+    CGContextDrawImage(cx, CGRectMake(0, 0, (CGFloat)w, (CGFloat)h), src);
+    out = CGBitmapContextCreateImage(cx);
+    if (out == NULL) goto done;
+    df.locale = [NSLocale localeWithLocaleIdentifier:@"en_US_POSIX"];
+    df.dateFormat = @"yyyy-MM-dd 'at' HH.mm.ss";
+    stamp = [df stringFromDate:[NSDate date]];
+    for (i = 1; i <= 99 && path == nil; i++)
+    {
+        NSString *name = i == 1 ? [NSString stringWithFormat:@"Pillars of Eternity %@.png", stamp]
+                                : [NSString stringWithFormat:@"Pillars of Eternity %@ (%u).png", stamp, i];
+        NSString *p = [dir stringByAppendingPathComponent:name];
+        if (![NSFileManager.defaultManager fileExistsAtPath:p]) path = p;
+    }
+    if (path == nil) goto done;
+    dst = CGImageDestinationCreateWithURL((__bridge CFURLRef)[NSURL fileURLWithPath:path], CFSTR("public.png"), 1, NULL);
+    if (dst == NULL) goto done;
+    CGImageDestinationAddImage(dst, out, NULL);
+    ok = CGImageDestinationFinalize(dst);
+done:
+    if (dst != NULL) CFRelease(dst);
+    if (out != NULL) CGImageRelease(out);
+    if (cx != NULL) CGContextRelease(cx);
+    if (src != NULL) CGImageRelease(src);
+    if (dp != NULL) CGDataProviderRelease(dp);
+    if (srgb != NULL) CGColorSpaceRelease(srgb);
+    if (lin != NULL) CGColorSpaceRelease(lin);
+    return ok;
+}
+
+/* Render thread, in d3d_present after the present pass: draw the
+   screenshot of the frame and copy it to a shared buffer in d->cb. */
+static void screenshot_encode(D3DDevice *d, id<MTLTexture> shown, id<MTLSamplerState> smp, const void *args, size_t argn,
+                              NSUInteger w, NSUInteger h, bool lut)
+{
+    MTLTextureDescriptor *td;
+    MTLRenderPassDescriptor *rp;
+    id<MTLTexture> t;
+    id<MTLBuffer> buf;
+    id<MTLRenderCommandEncoder> e;
+    id<MTLBlitCommandEncoder> be;
+    MTLViewport vp = { 0, 0, (double)w, (double)h, 0, 1 };
+    if (!atomic_exchange(&shot_requested, false)) return;
+    if (atomic_exchange(&shot_busy, true)) return;
+    if (shot_queue == nil)
+    {
+        shot_queue = dispatch_queue_create("rt.screenshot", DISPATCH_QUEUE_SERIAL);
+        if (shot_queue == nil) rt_fatal("D3D9: the screenshot queue cannot be made");
+    }
+    td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA16Float width:w height:h mipmapped:NO];
+    td.storageMode = MTLStorageModePrivate;
+    td.usage = MTLTextureUsageRenderTarget;
+    t = [d->mtl newTextureWithDescriptor:td];
+    buf = [d->mtl newBufferWithLength:w * h * 8u options:MTLResourceStorageModeShared];
+    if (t == nil || buf == nil)
+    {
+        /* Not enough memory for the image: no screenshot. */
+        atomic_store(&shot_busy, false);
+        screenshot_feedback(false);
+        return;
+    }
+    rp = [MTLRenderPassDescriptor renderPassDescriptor];
+    rp.colorAttachments[0].texture = t;
+    rp.colorAttachments[0].loadAction = MTLLoadActionDontCare;
+    rp.colorAttachments[0].storeAction = MTLStoreActionStore;
+    e = [d->cb renderCommandEncoderWithDescriptor:rp];
+    if (e == nil) rt_fatal("D3D9: screenshot encoder creation failed");
+    [e setRenderPipelineState:d->present_pso];
+    [e setViewport:vp];
+    [e setFragmentTexture:shown atIndex:0];
+    [e setFragmentTexture:lut ? d->gamma_tex : d->null_tex2d atIndex:1];
+    [e setFragmentSamplerState:smp atIndex:0];
+    [e setFragmentBytes:args length:argn atIndex:0];
+    [e setFragmentBuffer:d->gt7_inv offset:0 atIndex:1];
+    [e drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+    [e endEncoding];
+    be = [d->cb blitCommandEncoder];
+    if (be == nil) rt_fatal("D3D9: screenshot blit encoder creation failed");
+    [be copyFromTexture:t sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake(w, h, 1)
+               toBuffer:buf destinationOffset:0 destinationBytesPerRow:w * 8u destinationBytesPerImage:w * h * 8u];
+    [be endEncoding];
+    [d->cb addCompletedHandler:^(id<MTLCommandBuffer> cb) {
+      bool done = cb.status == MTLCommandBufferStatusCompleted;
+      dispatch_async(shot_queue, ^{
+        bool ok = done && screenshot_write(buf, w, h);
+        atomic_store(&shot_busy, false);
+        screenshot_feedback(ok);
+      });
+    }];
+}
+
 /* ---------------------------------------------------------------- frame capture */
 
 /* rt_d3d9_capture_init: the back buffer of a presented frame goes to
@@ -3093,7 +3221,6 @@ static void capture_frame(D3DDevice *d, id<MTLTexture> src)
     CGImageRelease(img);
     CGDataProviderRelease(dp);
     CGColorSpaceRelease(cs);
-    rt_log("D3D9: frame %llu captured to %s", (unsigned long long)d->present_count, path);
 }
 
 #if RT_DEV_BUILD
@@ -3130,8 +3257,6 @@ static void perf_frame(void)
     if (now - window_start >= 5.0)
     {
         double span = now - window_start;
-        rt_log("perf: %.1f fps, longest frame %.1f ms, CPU %.0f%% of one core", (double)frames / span, worst * 1000.0,
-               (cpu_now - cpu_start) / span * 100.0);
         window_start = now;
         cpu_start = cpu_now;
         frames = 0;
@@ -3196,8 +3321,6 @@ static id<MTLTexture> rcas_sharpen(D3DDevice *d, id<MTLTexture> src, bool linear
         if (d->rcas_out == nil)
             rt_fatal("D3D9: out of video memory (RCAS output %lux%lu)", (unsigned long)src.width,
                      (unsigned long)src.height);
-        rt_log("D3D9: RCAS sharpening at %lux%lu pixels (attenuation %.2f stops)", (unsigned long)src.width,
-               (unsigned long)src.height, rcas_stops());
     }
     args.sharp = (float)exp2(-rcas_stops());
     args.src_linear = linear ? 1u : 0u;
@@ -3244,8 +3367,6 @@ static id<MTLTexture> fx_upscale(D3DDevice *d, id<MTLTexture> src, NSUInteger w,
         td.usage = d->fx.outputTextureUsage | MTLTextureUsageShaderRead;
         d->fx_out = [d->mtl newTextureWithDescriptor:td];
         if (d->fx_out == nil) rt_fatal("D3D9: out of video memory (MetalFX output %lux%lu)", (unsigned long)w, (unsigned long)h);
-        rt_log("D3D9: MetalFX spatial upscaling: %lux%lu to %lux%lu pixels (%s color)", (unsigned long)src.width,
-               (unsigned long)src.height, (unsigned long)w, (unsigned long)h, linear ? "linear" : "perceptual");
     }
     if ((src.usage & d->fx.colorTextureUsage) != d->fx.colorTextureUsage)
         rt_fatal("D3D9: the back buffer texture usage 0x%lx does not have the MetalFX input usage 0x%lx",
@@ -3313,9 +3434,6 @@ static double pace_interval(D3DDevice *d, double start)
     if (d->pace_k != old && d->pace_logs < 16)
     {
         d->pace_logs++;
-        rt_log("D3D9: frame pacing: %.1f frames per second (%u of %.1f Hz; frame time %.1f ms)%s",
-               1.0 / ((double)d->pace_k * refresh), d->pace_k, 1.0 / refresh, d->pace_cost * 1000.0,
-               d->pace_logs == 16 ? "; later changes are not logged" : "");
     }
     /* The previous frame stays on the screen for at least k - 1/2
        intervals: the next refresh after that time is k intervals after it
@@ -3374,7 +3492,6 @@ void d3d_present(D3DDevice *d)
                 float peak, ka, kb, kc, target_i, out_scale;
                 uint32_t hdr;
             } pp_args;
-            static double logged_headroom;
             double headroom = (double)edr_headroom(d->layer);
             gt_curve gc;
             double dw = size.width, dh = size.height, bw = bb->width, bh = bb->height;
@@ -3415,12 +3532,6 @@ void d3d_present(D3DDevice *d)
             pp_args.target_i = (float)gt_pq_from_fb(gc.peak);
             pp_args.out_scale = (float)(1.0 / GT_SDR_PEAK);
             pp_args.hdr = rt_portgfx_get(RT_GFX_HDR) != 0;
-            if (pp_args.hdr && fabs(headroom - logged_headroom) > 0.1 * logged_headroom)
-            {
-                rt_log("D3D9: HDR output with GT7 tone mapping: EDR headroom %.2f, peak %.0f cd/m2", headroom,
-                       gc.peak * 100.0);
-                logged_headroom = headroom;
-            }
             pp_args.src_linear = src.pixelFormat == MTLPixelFormatBGRA8Unorm_sRGB || src.pixelFormat == MTLPixelFormatRGBA8Unorm_sRGB;
             /* A larger image on the screen than the back buffer: MetalFX
                spatial upscaling to the viewport size (the user's choice,
@@ -3454,35 +3565,19 @@ void d3d_present(D3DDevice *d)
             [e setFragmentBuffer:d->gt7_inv offset:0 atIndex:1];
             [e drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
             [e endEncoding];
+            if (atomic_load(&shot_requested))
+            {
+                pp_args.hdr = 0;
+                screenshot_encode(d, shown,
+                                  (vp.width == (double)shown.width && vp.height == (double)shown.height) ? d->present_point
+                                                                                                         : d->present_linear,
+                                  &pp_args, sizeof pp_args, (NSUInteger)vp.width, (NSUInteger)vp.height, pp_args.use_lut != 0);
+            }
             pace = pace_interval(d, start);
             if (pace > 0.0)
                 [d->cb presentDrawable:dr afterMinimumDuration:pace];
             else
                 [d->cb presentDrawable:dr];
-            if (d->present_count == 0 || !d->presented)
-            {
-                rt_log("D3D9: first frame presented: back buffer %ux%u, drawable %gx%g pixels", bb->width, bb->height,
-                       (double)dw, (double)dh);
-                d->presented = true;
-            }
-        }
-        else
-        {
-            /* Logged once for each change of the Win32 minimized state, so
-               that a minimize and a restore are both visible in the log. */
-            static int logged_min = -1;
-            uint32_t hw = d->pp[PP_HWND] != 0 ? d->pp[PP_HWND] : d->focus_hwnd;
-            int is_min = (rt_user32_style(hw) & WS_MINIMIZE) != 0;
-            if (logged_min != is_min && !rt_cocoa_headless())
-            {
-                rt_rect cr = rt_user32_client_rect(hw);
-                rt_log("D3D9: Present: the layer of window 0x%08x has the size %gx%g points (scale %g, %s thread); the "
-                       "Win32 window is %s with a %dx%d client area; the frame is not shown",
-                       hw, (double)bounds.width, (double)bounds.height, (double)scale,
-                       rt_cocoa_is_main_thread() ? "main" : "another", is_min ? "minimized" : "not minimized",
-                       cr.right - cr.left, cr.bottom - cr.top);
-                logged_min = is_min;
-            }
         }
         bb->last_use = d->serial;
         /* At most D3D_FRAMES_IN_FLIGHT frames are queued. */

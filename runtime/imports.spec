@@ -741,8 +741,13 @@ msvcp100 ?_Raise_handler@std@@3P6AXABVexception@stdext@@@ZA data 0
 portgfx PortGfxGet std 1
 portgfx PortGfxSet std 2
 portgfx PortGfxFail std 1
+portgfx PortGfxPixelScale std 0
 # The controller layer (tools/port_graphics/PortController.cs) reads the
 # game controller and presses keys with these functions (rt_gamepad.m).
 portgfx PortPadRead std 1
 portgfx PortPadCapture std 1
 portgfx PortPadKey std 2
+portgfx PortPadSnap std 1
+portgfx PortPadWarp std 4
+portgfx PortPadGlyphs std 0
+portgfx PortPadGlyph std 3

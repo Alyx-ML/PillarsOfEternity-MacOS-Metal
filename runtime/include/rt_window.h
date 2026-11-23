@@ -50,11 +50,19 @@ void rt_cocoa_init(bool headless);
 /* Game controller input (rt_gamepad.m). Main thread, once, after
    rt_cocoa_init; not in headless mode. */
 void rt_gamepad_init(void);
+/* Take a screenshot of the next presented frame (rt_d3d9_draw.m, see
+   "screenshots"). Any thread. */
+void rt_d3d9_request_screenshot(void);
 bool rt_cocoa_headless(void);
 
 /* The height of the title bar of a titled window (any thread, after
    rt_cocoa_init). */
 int32_t rt_cocoa_title_height(void);
+/* Win32 units for each point: the backing scale of the main display at
+   start (2 on a Retina display). Screen, window and cursor coordinates of
+   the program are in these units, so the game renders at the full
+   resolution of the display. */
+int rt_cocoa_pixel_scale(void);
 
 /* ---------------------------------------------------------------- displays */
 

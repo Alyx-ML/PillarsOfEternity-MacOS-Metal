@@ -272,6 +272,5 @@ int main(int argc, char **argv)
     for (i = first; i < argc; i++) wr32(gargv + 4u * (uint32_t)(i - first + 1), guest_str(argv[i]));
     mono_main = rt_module_export(base, "mono_main");
     code = rt_call(t->cpu, mono_main, false, 0, 2, (const uint32_t[]){ (uint32_t)margc, gargv });
-    rt_log("mono_main returned %d", (int)code);
     rt_process_exit(code);
 }

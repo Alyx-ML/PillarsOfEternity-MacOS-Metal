@@ -16,7 +16,7 @@
  *
  * The controller is GCController.current with the extended gamepad
  * profile (Xbox, PlayStation, Nintendo Switch Pro and MFi controllers).
- * A controller without that profile is not used; the log tells why. While a
+ * A controller without that profile is not used. While a
  * controller is connected, a timer on the main dispatch queue reads it
  * RT_PAD_HZ times a second (the framework sends no event while a stick
  * stays in one position). A controller that disconnects releases the
@@ -26,6 +26,7 @@
  * layer reads it on the game's main thread, and the timer writes it on the
  * main dispatch queue.
  */
+#import <AppKit/AppKit.h>
 #import <GameController/GameController.h>
 #import <Foundation/Foundation.h>
 
@@ -48,6 +49,14 @@
    PAD_REPEAT_DELAY seconds, then one notch each PAD_REPEAT_STEP seconds. */
 #define PAD_REPEAT_DELAY 0.35
 #define PAD_REPEAT_STEP 0.12
+/* Wheel notches each second at full deflection of the right stick in the
+   snap mode (PortPadSnap); the rate grows with the deflection. */
+#define PAD_SNAP_WHEEL_RATE 14.0
+/* Glyphs (PortPadGlyph): 0..15 the buttons of the PAD_* bits, then the
+   left stick, the right stick and the directional pad. */
+#define PAD_GLYPHS 19
+#define PAD_GLYPH_MIN 8
+#define PAD_GLYPH_MAX 256
 
 /* Bits of PortPadRead (tools/port_graphics/PortController.cs has the same
    values). */
@@ -67,6 +76,9 @@ typedef struct rt_pad_state {
 static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
 static rt_pad_state g_pub;  /* g_lock */
 static bool g_capture;      /* g_lock: the managed menu has the stick, A and B */
+static bool g_snap;         /* g_lock: the snap mode of the managed layer */
+static NSString *g_glyph_names[PAD_GLYPHS]; /* g_lock: SF Symbols of the current controller */
+static uint32_t g_glyph_gen;               /* g_lock: changes with g_glyph_names */
 
 /* Main dispatch queue only. */
 static dispatch_source_t g_timer;
@@ -76,7 +88,10 @@ static bool g_left_down, g_right_down;
 static double g_frac_x, g_frac_y; /* cursor motion below one pixel */
 static double g_repeat_at;        /* next wheel repeat, 0 = none */
 static double g_last;             /* time of the last sample */
-static __weak GCController *g_logged; /* the last controller that the log named */
+static bool g_share_prev;         /* the Share button in the last sample */
+static double g_wheel_acc;        /* snap mode: wheel notches below one */
+static __weak GCController *g_named; /* the controller of g_glyph_names */
+static bool g_named_set;
 
 static void pad_lock(void)
 {
@@ -113,6 +128,55 @@ static void release_mouse(void)
     g_left_down = g_right_down = false;
 }
 
+static NSString *symbol_of(GCControllerElement *e)
+{
+    NSString *n = e != nil ? e.sfSymbolsName : nil;
+    return n != nil && n.length > 0 ? [n copy] : nil;
+}
+
+/* Read the SF Symbols names of the controls of the current controller
+   when the controller changes (a controller with other glyphs, or none). */
+static void refresh_glyph_names(GCController *c, GCExtendedGamepad *p)
+{
+    NSString *n[PAD_GLYPHS];
+    unsigned i;
+    bool same = true;
+    if (g_named_set && g_named == c) return;
+    g_named = c;
+    g_named_set = true;
+    memset(n, 0, sizeof n);
+    if (p != nil)
+    {
+        n[0] = symbol_of(p.buttonA);
+        n[1] = symbol_of(p.buttonB);
+        n[2] = symbol_of(p.buttonX);
+        n[3] = symbol_of(p.buttonY);
+        n[4] = symbol_of(p.leftShoulder);
+        n[5] = symbol_of(p.rightShoulder);
+        n[6] = symbol_of(p.leftTrigger);
+        n[7] = symbol_of(p.rightTrigger);
+        n[8] = symbol_of(p.dpad.up);
+        n[9] = symbol_of(p.dpad.down);
+        n[10] = symbol_of(p.dpad.left);
+        n[11] = symbol_of(p.dpad.right);
+        n[12] = symbol_of(p.buttonMenu);
+        n[13] = symbol_of(p.buttonOptions);
+        n[14] = symbol_of(p.leftThumbstickButton);
+        n[15] = symbol_of(p.rightThumbstickButton);
+        n[16] = symbol_of(p.leftThumbstick);
+        n[17] = symbol_of(p.rightThumbstick);
+        n[18] = symbol_of(p.dpad);
+    }
+    pad_lock();
+    for (i = 0; i < PAD_GLYPHS; i++)
+    {
+        if (!(n[i] == g_glyph_names[i] || (n[i] != nil && [n[i] isEqualToString:g_glyph_names[i]]))) same = false;
+        g_glyph_names[i] = n[i];
+    }
+    if (!same) g_glyph_gen++;
+    pad_unlock();
+}
+
 static void sample(void)
 {
     GCController *c = GCController.current;
@@ -120,17 +184,12 @@ static void sample(void)
     rt_pad_state s;
     uint32_t b = 0, changed;
     double t = now_s(), dt;
-    bool capture;
+    bool capture, snap;
     memset(&s, 0, sizeof s);
     /* An inactive application gets no controller input: the last values
        would hold the buttons down. */
     if (!rt_user32_app_is_active()) p = nil;
-    if (c != nil && c != g_logged)
-    {
-        rt_log("gamepad: %s is the current controller%s", c.vendorName != nil ? c.vendorName.UTF8String : "a controller",
-               c.extendedGamepad != nil ? "" : "; it has no extended gamepad profile and is not used");
-        g_logged = c;
-    }
+    refresh_glyph_names(c, c != nil ? c.extendedGamepad : nil);
     if (p != nil)
     {
         s.connected = true;
@@ -158,9 +217,21 @@ static void sample(void)
         s.lt = p.leftTrigger.value;
         s.rt = p.rightTrigger.value;
     }
+    /* The Share button (PlayStation Create, Xbox Share, Switch Capture)
+       saves a screenshot, like F12. The extended gamepad profile has no
+       such button, so it comes from the physical input profile. When macOS
+       binds the button to its own screenshot gesture, the system takes the
+       screenshot and the port does not take a second one. */
+    {
+        GCControllerButtonInput *sb = p != nil ? c.physicalInputProfile.buttons[GCInputButtonShare] : nil;
+        bool share = sb != nil && !sb.boundToSystemGesture && sb.pressed;
+        if (share && !g_share_prev) rt_d3d9_request_screenshot();
+        g_share_prev = share;
+    }
     pad_lock();
     g_pub = s;
     capture = g_capture;
+    snap = g_snap;
     pad_unlock();
 
     dt = g_last > 0.0 ? fmin(t - g_last, 0.1) : 0.0;
@@ -212,6 +283,30 @@ static void sample(void)
             rt_user32_pad_button(1, false);
         }
     }
+    /* Snap mode: the managed layer moves the cursor with the directional
+       pad, and the right stick turns the wheel (lists in the windows). */
+    if (snap)
+    {
+        g_repeat_at = 0.0;
+        if (capture || s.ry == 0.0f || dt <= 0.0)
+            g_wheel_acc = 0.0;
+        else
+        {
+            g_wheel_acc += (double)s.ry * fabs((double)s.ry) * PAD_SNAP_WHEEL_RATE * dt;
+            while (g_wheel_acc >= 1.0)
+            {
+                rt_user32_pad_wheel(120);
+                g_wheel_acc -= 1.0;
+            }
+            while (g_wheel_acc <= -1.0)
+            {
+                rt_user32_pad_wheel(-120);
+                g_wheel_acc += 1.0;
+            }
+        }
+        return;
+    }
+    g_wheel_acc = 0.0;
     /* The wheel works in the menu too (it does nothing there). */
     if (changed & b & (PAD_UP | PAD_DOWN))
     {
@@ -271,16 +366,14 @@ void rt_gamepad_init(void)
                     object:nil
                      queue:NSOperationQueue.mainQueue
                 usingBlock:^(NSNotification *n) {
-                  GCController *c = n.object;
-                  rt_log("gamepad: %s connected", c.vendorName != nil ? c.vendorName.UTF8String : "a controller");
+                  (void)n;
                   update_timer();
                 }];
     [nc addObserverForName:GCControllerDidDisconnectNotification
                     object:nil
                      queue:NSOperationQueue.mainQueue
                 usingBlock:^(NSNotification *n) {
-                  GCController *c = n.object;
-                  rt_log("gamepad: %s disconnected", c.vendorName != nil ? c.vendorName.UTF8String : "a controller");
+                  (void)n;
                   update_timer();
                 }];
     update_timer();
@@ -325,6 +418,136 @@ void rt_PortPadCapture(_cpu *cpu)
     pad_lock();
     g_capture = on != 0;
     pad_unlock();
+}
+
+/* void __stdcall PortPadSnap(int on): the managed layer moves the cursor
+   between the controls of a window with the directional pad (1), or gives
+   the directional pad back to the mouse wheel (0). In the snap mode the
+   right stick turns the wheel. */
+void rt_PortPadSnap(_cpu *cpu)
+{
+    uint32_t on = ARG(0);
+    if (on > 1u) rt_fatal("PortPadSnap: %u is not 0 or 1", on);
+    pad_lock();
+    g_snap = on != 0;
+    pad_unlock();
+}
+
+typedef struct warp_job {
+    int32_t x, y, w, h;
+} warp_job;
+
+static void warp_job_run(void *ctx)
+{
+    warp_job *j = ctx;
+    rt_user32_pad_warp(j->x, j->y, j->w, j->h);
+    free(j);
+}
+
+/* void __stdcall PortPadWarp(int x, int y, int width, int height): put the
+   cursor at (x, y) of the game's frame of width x height pixels (origin top
+   left), on the main thread. */
+void rt_PortPadWarp(_cpu *cpu)
+{
+    int32_t x = (int32_t)ARG(0), y = (int32_t)ARG(1), w = (int32_t)ARG(2), h = (int32_t)ARG(3);
+    warp_job *j;
+    if (w <= 0 || h <= 0 || w > 65536 || h > 65536) rt_fatal("PortPadWarp: the frame size %dx%d", w, h);
+    j = malloc(sizeof *j);
+    if (j == NULL) rt_fatal("PortPadWarp: out of memory");
+    j->x = x;
+    j->y = y;
+    j->w = w;
+    j->h = h;
+    dispatch_async_f(dispatch_get_main_queue(), j, warp_job_run);
+}
+
+/* int __stdcall PortPadGlyphs(void): a number that changes when the
+   glyphs of PortPadGlyph change (another controller, or none). */
+void rt_PortPadGlyphs(_cpu *cpu)
+{
+    uint32_t g;
+    pad_lock();
+    g = g_glyph_gen;
+    pad_unlock();
+    RET(g);
+}
+
+/* int __stdcall PortPadGlyph(int glyph, int size, Color32 *pixels): draw
+   the SF Symbols glyph of a control of the current controller (0..15 the
+   buttons of the PAD_* bits, 16 the left stick, 17 the right stick, 18 the
+   directional pad) in white with alpha, centered in size x size pixels,
+   rows from the bottom (Texture2D.SetPixels32). Returns 1, or 0 if the
+   controller gives no glyph for the control (pixels are then
+   transparent). */
+void rt_PortPadGlyph(_cpu *cpu)
+{
+    uint32_t id = ARG(0), size = ARG(1), g = ARG(2), y;
+    size_t px, row;
+    NSString *name;
+    NSImage *img;
+    CGColorSpaceRef cs;
+    CGContextRef cx;
+    uint8_t *bits;
+    int rc = 0;
+    if (id >= PAD_GLYPHS) rt_fatal("PortPadGlyph: glyph %u", id);
+    if (size < PAD_GLYPH_MIN || size > PAD_GLYPH_MAX) rt_fatal("PortPadGlyph: size %u", size);
+    if (g == 0 || (uint64_t)g + (uint64_t)size * size * 4u > 0x100000000ull) rt_fatal("PortPadGlyph: pixels at 0x%08x", g);
+    px = size;
+    row = px * 4u;
+    pad_lock();
+    name = g_glyph_names[id];
+    pad_unlock();
+    cs = CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
+    if (cs == NULL) rt_fatal("PortPadGlyph: no sRGB color space");
+    cx = CGBitmapContextCreate(NULL, px, px, 8, row, cs, (CGBitmapInfo)kCGImageAlphaPremultipliedLast);
+    CGColorSpaceRelease(cs);
+    if (cx == NULL) rt_fatal("PortPadGlyph: the bitmap cannot be made");
+    CGContextClearRect(cx, CGRectMake(0, 0, (CGFloat)px, (CGFloat)px));
+    @autoreleasepool
+    {
+        img = name != nil ? [NSImage imageWithSystemSymbolName:name accessibilityDescription:nil] : nil;
+        if (img != nil)
+        {
+            NSImageSymbolConfiguration *cfg =
+                [NSImageSymbolConfiguration configurationWithPointSize:(CGFloat)px weight:NSFontWeightSemibold];
+            NSImage *sized = [img imageWithSymbolConfiguration:cfg];
+            NSSize sz = sized != nil ? sized.size : NSZeroSize;
+            if (sized != nil && sz.width > 0 && sz.height > 0)
+            {
+                /* Fit the glyph into the square, 1 pixel inside the edge. */
+                CGFloat box = (CGFloat)px - 2, k = fmin(box / sz.width, box / sz.height);
+                NSRect r = NSMakeRect(((CGFloat)px - sz.width * k) / 2, ((CGFloat)px - sz.height * k) / 2, sz.width * k,
+                                      sz.height * k);
+                NSGraphicsContext *gc = [NSGraphicsContext graphicsContextWithCGContext:cx flipped:NO];
+                [NSGraphicsContext saveGraphicsState];
+                NSGraphicsContext.currentContext = gc;
+                [sized drawInRect:r fromRect:NSZeroRect operation:NSCompositingOperationSourceOver fraction:1.0];
+                [NSGraphicsContext restoreGraphicsState];
+                rc = 1;
+            }
+        }
+    }
+    bits = CGBitmapContextGetData(cx);
+    if (bits == NULL) rt_fatal("PortPadGlyph: the bitmap has no data");
+    /* White with the alpha of the glyph; the bitmap's first row is the top
+       row, the first row of the texture is the bottom row. */
+    for (y = 0; y < size; y++)
+    {
+        const uint8_t *src = bits + (px - 1u - y) * row;
+        uint8_t line[PAD_GLYPH_MAX * 4];
+        size_t x;
+        for (x = 0; x < px; x++)
+        {
+            uint8_t a = src[4u * x + 3u];
+            line[4u * x] = 255;
+            line[4u * x + 1u] = 255;
+            line[4u * x + 2u] = 255;
+            line[4u * x + 3u] = a;
+        }
+        memcpy(G2H(g + y * (uint32_t)row), line, row);
+    }
+    CGContextRelease(cx);
+    RET((uint32_t)rc);
 }
 
 /* Unity KeyCode (UnityEngine.KeyCode of Unity 4) to the macOS virtual key

@@ -115,7 +115,6 @@ static NSColor *rgb(unsigned hex)
 static _Noreturn void launcher_fail(NSString *title, NSString *text)
 {
     NSAlert *a = [NSAlert new];
-    fprintf(stderr, "Pillars of Eternity: %s %s\n", title.UTF8String, text.UTF8String);
     a.alertStyle = NSAlertStyleCritical;
     a.messageText = title;
     a.informativeText = text;

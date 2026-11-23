@@ -319,10 +319,15 @@ void rt_PeekMessageW(_cpu *cpu); /* user32 PeekMessageW, 5 stack dwords */
 void rt_PeekNamedPipe(_cpu *cpu); /* kernel32 PeekNamedPipe, 6 stack dwords */
 void rt_PortGfxFail(_cpu *cpu); /* portgfx PortGfxFail, 1 stack dwords */
 void rt_PortGfxGet(_cpu *cpu); /* portgfx PortGfxGet, 1 stack dwords */
+void rt_PortGfxPixelScale(_cpu *cpu); /* portgfx PortGfxPixelScale, 0 stack dwords */
 void rt_PortGfxSet(_cpu *cpu); /* portgfx PortGfxSet, 2 stack dwords */
 void rt_PortPadCapture(_cpu *cpu); /* portgfx PortPadCapture, 1 stack dwords */
+void rt_PortPadGlyph(_cpu *cpu); /* portgfx PortPadGlyph, 3 stack dwords */
+void rt_PortPadGlyphs(_cpu *cpu); /* portgfx PortPadGlyphs, 0 stack dwords */
 void rt_PortPadKey(_cpu *cpu); /* portgfx PortPadKey, 2 stack dwords */
 void rt_PortPadRead(_cpu *cpu); /* portgfx PortPadRead, 1 stack dwords */
+void rt_PortPadSnap(_cpu *cpu); /* portgfx PortPadSnap, 1 stack dwords */
+void rt_PortPadWarp(_cpu *cpu); /* portgfx PortPadWarp, 4 stack dwords */
 void rt_PostQuitMessage(_cpu *cpu); /* user32 PostQuitMessage, 1 stack dwords */
 void rt_QueryPerformanceCounter(_cpu *cpu); /* kernel32 QueryPerformanceCounter, 1 stack dwords */
 void rt_QueryPerformanceFrequency(_cpu *cpu); /* kernel32 QueryPerformanceFrequency, 1 stack dwords */

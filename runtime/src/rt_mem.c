@@ -282,7 +282,7 @@ void rt_mem_init(void)
 {
     host_segment segs[MAX_SEGMENTS];
     unsigned nsegs, i;
-    uint64_t img_lo, win_lo, win_hi, addr, img_bytes = 0, guest_bytes = 0, free_bytes;
+    uint64_t img_lo, win_lo, win_hi, addr, free_bytes;
     long ps = sysconf(_SC_PAGESIZE);
 
     if (ps <= 0 || ps > (long)RT_GRANULE || ((uint32_t)ps & ((uint32_t)ps - 1)) != 0)
@@ -323,7 +323,6 @@ void rt_mem_init(void)
             num_image_ranges++;
         }
         for (p = lo; p < hi; p++) page_protect[p] = RT_PAGE_EXECUTE_READ;
-        img_bytes += segs[i].hi - segs[i].lo;
     }
     /* Each __GUEST segment: the granules that it holds completely become
        free guest address space. MAP_FIXED replaces the zero-fill memory of
@@ -346,7 +345,6 @@ void rt_mem_init(void)
             granule_state[g] = G_FREE;
             granule_guest_space[g] = 1;
         }
-        guest_bytes += e - s;
     }
 
     /* Reserve every free gap from the start of the image to the end of the
@@ -381,9 +379,6 @@ void rt_mem_init(void)
         addr = ((uint64_t)raddr + rsize + RT_GRANULE - 1) & ~(uint64_t)(RT_GRANULE - 1);
     }
     free_bytes = rt_va_free_bytes();
-    rt_log("guest window 0x%llx, image %llu MiB, guest space segment %llu MiB, %llu MiB free for the guest",
-           (unsigned long long)rt_ptrofs, (unsigned long long)(img_bytes >> 20), (unsigned long long)(guest_bytes >> 20),
-           (unsigned long long)(free_bytes >> 20));
     if (free_bytes < UINT64_C(0x40000000)) rt_fatal("less than 1 GiB of guest memory is free");
 }
 
@@ -395,8 +390,6 @@ void rt_mem_use_guest_space_only(void)
     guest_space_only = true;
     unlock_counted(&va_lock);
     if (n == 0) rt_fatal("rt_mem_use_guest_space_only: the program image has no __GUEST segment");
-    rt_log("guest memory: allocations without an address use only the %u MiB of the __GUEST segments",
-           (unsigned)(((uint64_t)n * RT_GRANULE) >> 20));
 }
 
 /* ---------------------------------------------------------------- address space */

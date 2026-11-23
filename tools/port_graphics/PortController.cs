@@ -12,14 +12,28 @@
 //   LB / RB        previous / next party member
 //   RT (hold)      Highlight (hold)    LT             radial ability menu
 //   left / right   Slow / Fast mode (directional pad)
-//   Menu           game menu           View           Inventory
+//   Menu           game menu           View (tap)     Inventory
 //   L3             Stealth             R3             Follow camera
-//   right stick    camera pan
+//   right stick    camera pan          View (hold)    help overlay
+//
+// Snap mode: while a game window has the focus (inventory, character
+// sheet, dialogue, stores, message boxes; UIWindowManager.IsFocused), the
+// directional pad moves the cursor to the next control of the window in
+// that direction (a collider with a click handler that a raycast of the UI
+// camera reaches), and the right stick scrolls (the runtime turns it into
+// the mouse wheel, PortPadSnap). A small glyph of the A button shows next
+// to the control under the cursor. The left stick still moves the cursor.
+//
+// Glyphs: the runtime draws the SF Symbols glyph of each control of the
+// current controller (PortPadGlyph), so the hints show the buttons of
+// that controller (Xbox, PlayStation, Nintendo). The radial menu shows the
+// buttons for use, back and close under the ring. Holding View shows the
+// help overlay with all controls and the game's names of the commands.
 //
 // Each command presses the key that the player bound to it in the game's
 // Controls options (GameState.Controls), with its modifier keys, while the
-// button is down (PortPadKey). A command without a key binding does
-// nothing; the log names it once.
+// button is down (PortPadKey). A command without a key binding, or with a
+// key that a Mac keyboard does not have, does nothing.
 //
 // The radial ability menu shows the buttons of the game's ability bar
 // (UIAbilityBar) for the selected party member in a ring at the center of
@@ -44,6 +58,7 @@
 // distribute, upload or commit the compiled assembly or its AOT image.
 using System;
 using System.Collections.Generic;
+using System.Reflection;
 using System.Runtime.InteropServices;
 using UnityEngine;
 
@@ -53,8 +68,12 @@ namespace PortGraphics
     {
         // Bits of PortPadRead (runtime/src/rt_gamepad.m has the same values).
         const int PadA = 1 << 0, PadB = 1 << 1, PadX = 1 << 2, PadY = 1 << 3, PadLB = 1 << 4, PadRB = 1 << 5,
-            PadLT = 1 << 6, PadRT = 1 << 7, PadLeft = 1 << 10, PadRight = 1 << 11, PadMenu = 1 << 12,
-            PadView = 1 << 13, PadL3 = 1 << 14, PadR3 = 1 << 15;
+            PadLT = 1 << 6, PadRT = 1 << 7, PadUp = 1 << 8, PadDown = 1 << 9, PadLeft = 1 << 10, PadRight = 1 << 11,
+            PadMenu = 1 << 12, PadView = 1 << 13, PadL3 = 1 << 14, PadR3 = 1 << 15;
+        // Glyphs of PortPadGlyph: 0..15 the bit numbers above, then these.
+        const int GlyphA = 0, GlyphB = 1, GlyphX = 2, GlyphY = 3, GlyphLB = 4, GlyphRB = 5, GlyphLT = 6, GlyphRT = 7,
+            GlyphLeft = 10, GlyphRight = 11, GlyphMenu = 12, GlyphView = 13, GlyphL3 = 14, GlyphR3 = 15,
+            GlyphLeftStick = 16, GlyphRightStick = 17, GlyphDpad = 18, GlyphCount = 19;
 
         [DllImport("portgfx", CallingConvention = CallingConvention.StdCall)]
         static extern int PortPadRead(float[] axes);
@@ -65,6 +84,18 @@ namespace PortGraphics
         [DllImport("portgfx", CallingConvention = CallingConvention.StdCall)]
         static extern int PortPadKey(int unityKeyCode, int down);
 
+        [DllImport("portgfx", CallingConvention = CallingConvention.StdCall)]
+        static extern void PortPadSnap(int on);
+
+        [DllImport("portgfx", CallingConvention = CallingConvention.StdCall)]
+        static extern void PortPadWarp(int x, int y, int width, int height);
+
+        [DllImport("portgfx", CallingConvention = CallingConvention.StdCall)]
+        static extern int PortPadGlyphs();
+
+        [DllImport("portgfx", CallingConvention = CallingConvention.StdCall)]
+        static extern int PortPadGlyph(int glyph, int size, [Out] Color32[] pixels);
+
         [DllImport("portgfx", CallingConvention = CallingConvention.StdCall, CharSet = CharSet.Ansi)]
         static extern void PortGfxFail(string message);
 
@@ -74,7 +105,6 @@ namespace PortGraphics
         {
             public readonly MappedControl Control;
             public readonly List<int> Held = new List<int>();
-            public bool Logged;
             public Command(MappedControl control)
             {
                 Control = control;
@@ -82,16 +112,18 @@ namespace PortGraphics
         }
 
         // Button commands: the bit, then the command.
-        static readonly int[] ButtonBits = { PadX, PadY, PadLB, PadRB, PadRT, PadLeft, PadRight, PadMenu, PadView, PadL3, PadR3 };
+        // View is not here: Help handles it (tap: Inventory, hold: help).
+        static readonly int[] ButtonBits = { PadX, PadY, PadLB, PadRB, PadRT, PadLeft, PadRight, PadMenu, PadL3, PadR3 };
+        static readonly int[] ButtonGlyphs = { GlyphX, GlyphY, GlyphLB, GlyphRB, GlyphRT, GlyphLeft, GlyphRight, GlyphMenu, GlyphL3, GlyphR3 };
         static readonly Command[] ButtonCommands =
         {
             new Command(MappedControl.SELECT_ALL), new Command(MappedControl.PAUSE),
             new Command(MappedControl.PREVIOUS_COMPANION), new Command(MappedControl.NEXT_COMPANION),
             new Command(MappedControl.HIGHLIGHT_HOLD), new Command(MappedControl.SLOW_TOGGLE),
             new Command(MappedControl.FAST_TOGGLE), new Command(MappedControl.OPTIONS),
-            new Command(MappedControl.INVENTORY), new Command(MappedControl.STEALTH_TOGGLE),
-            new Command(MappedControl.FOLLOW_CAM),
+            new Command(MappedControl.STEALTH_TOGGLE), new Command(MappedControl.FOLLOW_CAM),
         };
+        static readonly Command Inventory = new Command(MappedControl.INVENTORY);
         // Camera pan on the right stick: left, right, up, down.
         static readonly Command[] PanCommands =
         {
@@ -118,18 +150,21 @@ namespace PortGraphics
                     if (s_Connected) Disconnect();
                     return;
                 }
-                if (!s_Connected)
-                {
-                    s_Connected = true;
-                    Debug.Log("PortController: a controller is in use");
-                }
-                int down = b & ~s_Prev;
+                s_Connected = true;
+                int down = b & ~s_Prev, up = s_Prev & ~b;
                 s_Prev = b;
-                for (int i = 0; i < ButtonBits.Length; i++) Hold(ButtonCommands[i], (b & ButtonBits[i]) != 0);
-                Pan(0, -s_Axes[2]);
-                Pan(1, s_Axes[2]);
-                Pan(2, s_Axes[3]);
-                Pan(3, -s_Axes[3]);
+                Glyphs.Tick();
+                Help.Tick(b, down, up);
+                Snap.Tick(b, down, Menu.IsOpen);
+                // In the snap mode the directional pad and the right stick
+                // belong to the window.
+                int commands = Snap.On ? b & ~(PadLeft | PadRight) : b;
+                for (int i = 0; i < ButtonBits.Length; i++) Hold(ButtonCommands[i], (commands & ButtonBits[i]) != 0);
+                float rx = Snap.On ? 0f : s_Axes[2], ry = Snap.On ? 0f : s_Axes[3];
+                Pan(0, -rx);
+                Pan(1, rx);
+                Pan(2, ry);
+                Pan(3, -ry);
                 Menu.Tick(down, s_Axes[0], s_Axes[1]);
             }
             catch (Exception e)
@@ -144,8 +179,9 @@ namespace PortGraphics
             s_Prev = 0;
             foreach (Command c in ButtonCommands) Hold(c, false);
             foreach (Command c in PanCommands) Hold(c, false);
+            Help.Reset();
+            Snap.Reset();
             Menu.Close();
-            Debug.Log("PortController: no controller is in use");
         }
 
         static void Pan(int i, float v)
@@ -182,21 +218,13 @@ namespace PortGraphics
                     c.Held.Add((int)k.KeyCode);
                     break;
                 }
-            if (c.Held.Count == 0)
-            {
-                if (!c.Logged) Debug.Log("PortController: " + c.Control + " has no key binding; its controller button does nothing");
-                c.Logged = true;
-                return;
-            }
+            if (c.Held.Count == 0) return;
             foreach (int k in c.Held)
                 if (PortPadKey(k, 1) == 0)
                 {
                     // The game allows keys that a Mac keyboard does not
                     // have (Pause, Scroll Lock): release what was pressed.
                     for (int i = c.Held.IndexOf(k) - 1; i >= 0; i--) Key(c.Held[i], false);
-                    if (!c.Logged)
-                        Debug.Log("PortController: the key " + (KeyCode)k + " of " + c.Control + " has no Mac key; its controller button does nothing");
-                    c.Logged = true;
                     c.Held.Clear();
                     return;
                 }
@@ -227,6 +255,11 @@ namespace PortGraphics
             static Texture2D s_DiscTexture;
             static int s_Selected = -1;
             static float s_IconSize;
+
+            public static bool IsOpen
+            {
+                get { return s_Root != null; }
+            }
 
             public static void Tick(int down, float lx, float ly)
             {
@@ -425,18 +458,6 @@ namespace PortGraphics
                 return t;
             }
 
-            static UITexture AddTexture(GameObject parent, Texture tex, Shader shader, float size, int depth)
-            {
-                GameObject go = NGUITools.AddChild(parent);
-                UITexture w = (UITexture)go.AddComponent(typeof(UITexture));
-                w.shader = shader;
-                w.mainTexture = tex;
-                w.pivot = UIWidget.Pivot.Center;
-                w.depth = depth;
-                go.transform.localScale = new Vector3(size, size, 1f);
-                return w;
-            }
-
             static void Build(UIAbilityBar bar, List<UIAbilityBarButton> buttons)
             {
                 Clear();
@@ -457,12 +478,12 @@ namespace PortGraphics
                 int n = buttons.Count;
                 float radius = Mathf.Max(RingMin * s_IconSize, n * SlotSpacing * s_IconSize / (2f * Mathf.PI));
                 Shader shader = first.Icon.shader;
-                s_Back = AddTexture(s_Root, Disc(), shader, 2f * (radius + s_IconSize * 1.1f), Depth);
+                s_Back = Ui.AddTexture(s_Root, Disc(), shader, 2f * (radius + s_IconSize * 1.1f), Depth);
                 for (int i = 0; i < n; i++)
                 {
                     UIAbilityBarButton b = buttons[i];
                     float a = i * 2f * Mathf.PI / n;
-                    UITexture icon = AddTexture(s_Root, b.Icon.mainTexture, shader, s_IconSize, Depth + 2);
+                    UITexture icon = Ui.AddTexture(s_Root, b.Icon.mainTexture, shader, s_IconSize, Depth + 2);
                     icon.uvRect = b.Icon.uvRect;
                     icon.transform.localPosition = new Vector3(Mathf.Sin(a) * radius, Mathf.Cos(a) * radius, 0f);
                     icon.color = b.Disabled ? new Color(0.45f, 0.45f, 0.45f, 0.6f) : new Color(1f, 1f, 1f, 0.85f);
@@ -482,6 +503,11 @@ namespace PortGraphics
                 s_Name.effectStyle = UILabel.Effect.Shadow;
                 s_Name.text = "";
                 s_Name.MakePixelPerfect();
+                // The buttons of the menu, under the ring.
+                float hy = -(radius + s_IconSize * 1.75f), hg = s_IconSize * 0.5f, step = s_IconSize * 2.4f;
+                Ui.Row(s_Root, template.font, shader, -step - hg, hy, hg, GlyphA, "Use", Depth + 4);
+                Ui.Row(s_Root, template.font, shader, -hg, hy, hg, GlyphB, "Back", Depth + 4);
+                Ui.Row(s_Root, template.font, shader, step - hg, hy, hg, GlyphLT, "Close", Depth + 4);
                 s_Selected = -1;
             }
 
@@ -504,6 +530,541 @@ namespace PortGraphics
                 icon.color = disabled ? new Color(0.45f, 0.45f, 0.45f, selected ? 0.8f : 0.6f)
                                       : new Color(1f, 1f, 1f, selected ? 1f : 0.85f);
                 icon.depth = Depth + (selected ? 3 : 2);
+            }
+        }
+
+        // ---------------------------------------------------------------- glyphs
+
+        // The SF Symbols glyphs of the current controller, white with alpha
+        // (the widget color tints them).
+        static class Glyphs
+        {
+            const int Size = 64;
+            static readonly Texture2D[] s_Tex = new Texture2D[GlyphCount];
+            static readonly bool[] s_Has = new bool[GlyphCount];
+            static readonly Color32[] s_Pixels = new Color32[Size * Size];
+            static bool s_Loaded;
+            static int s_Gen;
+
+            public static void Tick()
+            {
+                int gen = PortPadGlyphs();
+                if (s_Loaded && gen == s_Gen) return;
+                s_Loaded = true;
+                s_Gen = gen;
+                for (int i = 0; i < GlyphCount; i++)
+                {
+                    s_Has[i] = PortPadGlyph(i, Size, s_Pixels) != 0;
+                    if (!s_Has[i]) continue;
+                    if (s_Tex[i] == null)
+                    {
+                        s_Tex[i] = new Texture2D(Size, Size, TextureFormat.ARGB32, false);
+                        s_Tex[i].wrapMode = TextureWrapMode.Clamp;
+                        s_Tex[i].filterMode = FilterMode.Bilinear;
+                    }
+                    s_Tex[i].SetPixels32(s_Pixels);
+                    s_Tex[i].Apply(false, false);
+                }
+                // Hints that are open show the old glyphs: build them again.
+                Help.Rebuild();
+            }
+
+            // The glyph, or null if the controller has none for the control.
+            public static Texture2D Get(int glyph)
+            {
+                return s_Has[glyph] ? s_Tex[glyph] : null;
+            }
+        }
+
+        // ---------------------------------------------------------------- UI helpers
+
+        static class Ui
+        {
+            static Transform s_FontRoot;
+            static UIFont s_Font;
+            static Shader s_Shader;
+
+            public static UITexture AddTexture(GameObject parent, Texture tex, Shader shader, float size, int depth)
+            {
+                GameObject go = NGUITools.AddChild(parent);
+                UITexture w = (UITexture)go.AddComponent(typeof(UITexture));
+                w.shader = shader;
+                w.mainTexture = tex;
+                w.pivot = UIWidget.Pivot.Center;
+                w.depth = depth;
+                go.transform.localScale = new Vector3(size, size, 1f);
+                return w;
+            }
+
+            public static UILabel AddLabel(GameObject parent, UIFont font, string text, UIWidget.Pivot pivot, int depth)
+            {
+                GameObject go = NGUITools.AddChild(parent);
+                UILabel l = (UILabel)go.AddComponent(typeof(UILabel));
+                l.font = font;
+                l.pivot = pivot;
+                l.depth = depth;
+                l.effectStyle = UILabel.Effect.Shadow;
+                l.text = text;
+                l.MakePixelPerfect();
+                return l;
+            }
+
+            // A glyph of g units with its left edge at x, and the text after
+            // it; nothing if the controller has no such control.
+            public static void Row(GameObject parent, UIFont font, Shader shader, float x, float y, float g, int glyph, string text, int depth)
+            {
+                Texture2D t = Glyphs.Get(glyph);
+                if (t == null) return;
+                UITexture w = AddTexture(parent, t, shader, g, depth);
+                w.transform.localPosition = new Vector3(x + g * 0.5f, y, 0f);
+                UILabel l = AddLabel(parent, font, text, UIWidget.Pivot.Left, depth);
+                l.transform.localPosition = new Vector3(x + g * 1.35f, y, 0f);
+            }
+
+            // The shader of NGUI for textures with alpha and a tint.
+            public static Shader TextureShader()
+            {
+                if (s_Shader != null) return s_Shader;
+                s_Shader = Shader.Find("Unlit/Transparent Colored");
+                if (s_Shader == null) throw new InvalidOperationException("the game has no shader Unlit/Transparent Colored");
+                return s_Shader;
+            }
+
+            // The root of the game's HUD and its UI camera; null when the game
+            // shows no HUD (the main menu, loading).
+            public static Transform HudRoot(out Camera cam)
+            {
+                cam = null;
+                UIWindowManager m = UIWindowManager.Instance;
+                if (m == null || !m.gameObject.activeInHierarchy) return null;
+                cam = NGUITools.FindCameraForLayer(m.gameObject.layer);
+                return cam == null ? null : m.transform.root;
+            }
+
+            public static UIFont Font(Transform root)
+            {
+                if (s_Font != null && s_FontRoot == root) return s_Font;
+                s_Font = null;
+                s_FontRoot = root;
+                foreach (Component c in root.GetComponentsInChildren(typeof(UILabel), true))
+                {
+                    UILabel l = (UILabel)c;
+                    if (l.font != null)
+                    {
+                        s_Font = l.font;
+                        break;
+                    }
+                }
+                if (s_Font == null) throw new InvalidOperationException("the HUD has no label font");
+                return s_Font;
+            }
+
+            // UI units (local to root) for one screen pixel.
+            public static float UnitsPerPixel(Transform root, Camera cam)
+            {
+                float scale = root.lossyScale.x;
+                if (scale <= 0f) throw new InvalidOperationException("the UI root has no scale");
+                Vector3 a = cam.ScreenToWorldPoint(new Vector3(0f, 0f, 0f)), b = cam.ScreenToWorldPoint(new Vector3(100f, 0f, 0f));
+                return (b - a).magnitude / 100f / scale;
+            }
+
+            // A panel of the menu's colors: a dark ground with a thin gold rim
+            // and round corners (made here; no game art).
+            public static Texture2D Panel(int w, int h, int radius)
+            {
+                Texture2D t = new Texture2D(w, h, TextureFormat.ARGB32, false);
+                Color32[] px = new Color32[w * h];
+                for (int y = 0; y < h; y++)
+                    for (int x = 0; x < w; x++)
+                    {
+                        // Distance outside the rectangle inset by the radius.
+                        float dx = Mathf.Max(0f, Mathf.Max(radius - x - 0.5f, x + 0.5f - (w - radius)));
+                        float dy = Mathf.Max(0f, Mathf.Max(radius - y - 0.5f, y + 0.5f - (h - radius)));
+                        float edge = radius - Mathf.Sqrt(dx * dx + dy * dy); // pixels inside the shape
+                        float a = Mathf.Clamp01(edge);
+                        if (a <= 0f)
+                        {
+                            px[y * w + x] = new Color32(0, 0, 0, 0);
+                            continue;
+                        }
+                        float rim = Mathf.Clamp01(1.5f - Mathf.Abs(edge - 1.5f)) * 0.55f;
+                        byte r = (byte)Mathf.RoundToInt(Mathf.Lerp(12f, 184f, rim)), g = (byte)Mathf.RoundToInt(Mathf.Lerp(10f, 145f, rim)),
+                             bl = (byte)Mathf.RoundToInt(Mathf.Lerp(8f, 58f, rim));
+                        px[y * w + x] = new Color32(r, g, bl, (byte)Mathf.RoundToInt(a * Mathf.Lerp(0.86f, 1f, rim) * 255f));
+                    }
+                t.SetPixels32(px);
+                t.wrapMode = TextureWrapMode.Clamp;
+                t.Apply(false, true);
+                return t;
+            }
+        }
+
+        // ---------------------------------------------------------------- snap mode
+
+        static class Snap
+        {
+            const float RepeatDelay = 0.35f, RepeatStep = 0.14f;
+            // Minimum move in the direction (pixels), and the weight of the
+            // distance across the direction in the choice of the next control.
+            const float MinStep = 4f, Across = 2.5f;
+            static readonly Vector2[] Dirs = { new Vector2(0f, 1f), new Vector2(0f, -1f), new Vector2(-1f, 0f), new Vector2(1f, 0f) };
+            static readonly int[] DirBits = { PadUp, PadDown, PadLeft, PadRight };
+            static readonly object Yes = new object(), No = new object();
+            static readonly Dictionary<Type, object> s_Handlers = new Dictionary<Type, object>();
+            static readonly List<UIHudWindow> s_Focused = new List<UIHudWindow>();
+            static FieldInfo s_Windows;
+            static bool s_On;
+            static int s_Dir = -1;
+            static float s_RepeatAt;
+            static Vector2 s_Aim;
+            static int s_AimFrame = -100;
+            static Collider s_Target;
+
+            public static bool On
+            {
+                get { return s_On; }
+            }
+
+            public static void Reset()
+            {
+                if (s_On) PortPadSnap(0);
+                s_On = false;
+                s_Dir = -1;
+                s_Target = null;
+                Badge.Hide();
+            }
+
+            public static void Tick(int b, int down, bool menuOpen)
+            {
+                bool want = !menuOpen && FindFocused();
+                if (want != s_On)
+                {
+                    s_On = want;
+                    PortPadSnap(want ? 1 : 0);
+                    s_Dir = -1;
+                    if (!want) s_Target = null;
+                }
+                if (!s_On)
+                {
+                    Badge.Hide();
+                    return;
+                }
+                float now = Time.realtimeSinceStartup;
+                int dir = -1;
+                for (int i = 0; i < 4; i++)
+                    if ((down & DirBits[i]) != 0)
+                    {
+                        dir = i;
+                        break;
+                    }
+                if (dir >= 0)
+                {
+                    s_Dir = dir;
+                    s_RepeatAt = now + RepeatDelay;
+                }
+                else if (s_Dir >= 0 && (b & DirBits[s_Dir]) != 0)
+                {
+                    if (now >= s_RepeatAt)
+                    {
+                        dir = s_Dir;
+                        s_RepeatAt = now + RepeatStep;
+                    }
+                }
+                else
+                    s_Dir = -1;
+                if (dir >= 0) Move(dir);
+                Badge.Tick(s_Target);
+            }
+
+            // The windows with the focus that take the player's attention
+            // (not a part of the HUD that only shows).
+            static bool FindFocused()
+            {
+                s_Focused.Clear();
+                UIWindowManager m = UIWindowManager.Instance;
+                if (m == null) return false;
+                if (s_Windows == null)
+                {
+                    s_Windows = typeof(UIWindowManager).GetField("m_Windows", BindingFlags.Instance | BindingFlags.NonPublic);
+                    if (s_Windows == null) throw new InvalidOperationException("UIWindowManager has no m_Windows");
+                }
+                List<UIHudWindow> all = (List<UIHudWindow>)s_Windows.GetValue(m);
+                if (all == null) return false;
+                foreach (UIHudWindow w in all)
+                {
+                    if (w == null || !m.IsFocused(w)) continue;
+                    if (w.PausesGame || w.HidesHud || w.DimsBackground || w.EatsKeyInput || w.EatsMouseInput || w.MessageBox || w is UIConversationManager)
+                        s_Focused.Add(w);
+                }
+                return s_Focused.Count > 0;
+            }
+
+            static void Move(int dir)
+            {
+                Vector2 from = Time.frameCount - s_AimFrame <= 2 ? s_Aim : new Vector2(Input.mousePosition.x, Input.mousePosition.y);
+                Vector2 d = Dirs[dir];
+                float sw = Screen.width, sh = Screen.height, best = float.MaxValue;
+                Collider target = null;
+                Vector2 at = Vector2.zero;
+                foreach (UIHudWindow w in s_Focused)
+                    foreach (Component comp in w.GetComponentsInChildren(typeof(Collider)))
+                    {
+                        Collider c = (Collider)comp;
+                        if (!c.enabled || !Clickable(c.gameObject)) continue;
+                        Camera cam = NGUITools.FindCameraForLayer(c.gameObject.layer);
+                        if (cam == null) continue;
+                        Bounds bb = c.bounds;
+                        Vector3 lo = cam.WorldToScreenPoint(bb.min), hi = cam.WorldToScreenPoint(bb.max), mid = cam.WorldToScreenPoint(bb.center);
+                        float wpx = Mathf.Abs(hi.x - lo.x), hpx = Mathf.Abs(hi.y - lo.y);
+                        // Not a point of the screen, or a background that
+                        // catches clicks.
+                        if (wpx < 2f || hpx < 2f || (wpx > 0.5f * sw && hpx > 0.5f * sh)) continue;
+                        if (mid.x < 0f || mid.y < 0f || mid.x >= sw || mid.y >= sh) continue;
+                        float vx = mid.x - from.x, vy = mid.y - from.y;
+                        float along = vx * d.x + vy * d.y;
+                        if (along < MinStep) continue;
+                        float score = along + Across * Mathf.Abs(vx * d.y - vy * d.x);
+                        if (score >= best || !Reaches(c, mid)) continue;
+                        best = score;
+                        target = c;
+                        at = new Vector2(mid.x, mid.y);
+                    }
+                if (target == null) return;
+                s_Target = target;
+                s_Aim = at;
+                s_AimFrame = Time.frameCount;
+                PortPadWarp(Mathf.RoundToInt(at.x), Screen.height - Mathf.RoundToInt(at.y), Screen.width, Screen.height);
+            }
+
+            // A click at the point goes to the collider (or a part of it):
+            // nothing covers it and the panel does not clip it.
+            static bool Reaches(Collider c, Vector3 at)
+            {
+                RaycastHit hit = new RaycastHit();
+                Camera keep = UICamera.currentCamera;
+                bool ok = UICamera.Raycast(new Vector3(at.x, at.y, 0f), out hit);
+                UICamera.currentCamera = keep;
+                return ok && hit.collider != null && (hit.collider == c || hit.collider.transform.IsChildOf(c.transform));
+            }
+
+            // NGUI sends OnClick, OnPress and OnDoubleClick to the object
+            // under the cursor.
+            static bool Clickable(GameObject go)
+            {
+                foreach (Component comp in go.GetComponents(typeof(MonoBehaviour)))
+                {
+                    MonoBehaviour mb = comp as MonoBehaviour;
+                    if (mb == null || !mb.enabled) continue;
+                    UIEventListener l = mb as UIEventListener;
+                    if (l != null)
+                    {
+                        if (l.onClick != null || l.onPress != null || l.onDoubleClick != null) return true;
+                        continue;
+                    }
+                    Type t = mb.GetType();
+                    object h;
+                    if (!s_Handlers.TryGetValue(t, out h))
+                    {
+                        h = Handles(t, "OnClick") || Handles(t, "OnPress") || Handles(t, "OnDoubleClick") ? Yes : No;
+                        s_Handlers[t] = h;
+                    }
+                    if (h == Yes) return true;
+                }
+                return false;
+            }
+
+            static bool Handles(Type t, string name)
+            {
+                const BindingFlags flags = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.DeclaredOnly;
+                for (; t != null && t != typeof(MonoBehaviour); t = t.BaseType)
+                    if (t.GetMember(name, MemberTypes.Method, flags).Length > 0) return true;
+                return false;
+            }
+        }
+
+        // The glyph of A at the top right corner of the control under the
+        // cursor in the snap mode.
+        static class Badge
+        {
+            const float SizePx = 22f;
+            const int Depth = 2050;
+            static GameObject s_Root;
+            static Transform s_UiRoot;
+            static UITexture s_Icon;
+
+            public static void Hide()
+            {
+                if (s_Root != null) UnityEngine.Object.Destroy(s_Root);
+                s_Root = null;
+                s_UiRoot = null;
+                s_Icon = null;
+            }
+
+            public static void Tick(Collider target)
+            {
+                Texture2D tex = Glyphs.Get(GlyphA);
+                if (target == null || tex == null || !target.enabled || !target.gameObject.activeInHierarchy)
+                {
+                    Hide();
+                    return;
+                }
+                Camera cam = NGUITools.FindCameraForLayer(target.gameObject.layer);
+                if (cam == null)
+                {
+                    Hide();
+                    return;
+                }
+                Bounds bb = target.bounds;
+                Vector3 lo = cam.WorldToScreenPoint(bb.min), hi = cam.WorldToScreenPoint(bb.max), m = Input.mousePosition;
+                float x0 = Mathf.Min(lo.x, hi.x), x1 = Mathf.Max(lo.x, hi.x), y0 = Mathf.Min(lo.y, hi.y), y1 = Mathf.Max(lo.y, hi.y);
+                if (m.x < x0 - 2f || m.x > x1 + 2f || m.y < y0 - 2f || m.y > y1 + 2f)
+                {
+                    Hide();
+                    return;
+                }
+                Transform root = target.transform.root;
+                if (s_Root == null || s_UiRoot != root)
+                {
+                    Hide();
+                    s_UiRoot = root;
+                    s_Root = NGUITools.AddChild(root.gameObject);
+                    s_Root.name = "PortController.Badge";
+                    s_Root.AddComponent(typeof(UIPanel));
+                    s_Icon = Ui.AddTexture(s_Root, tex, Ui.TextureShader(), SizePx * Ui.UnitsPerPixel(root, cam), Depth);
+                }
+                s_Icon.mainTexture = tex;
+                Vector3 corner = cam.ScreenToWorldPoint(new Vector3(x1 - SizePx * 0.25f, y1 - SizePx * 0.25f, 0f));
+                Vector3 local = root.InverseTransformPoint(corner);
+                s_Root.transform.localPosition = new Vector3(local.x, local.y, -10f);
+            }
+        }
+
+        // ---------------------------------------------------------------- help overlay
+
+        // View: a tap presses the Inventory key; holding it shows the help
+        // overlay until it is released.
+        static class Help
+        {
+            const float HoldTime = 0.4f;
+            const int Depth = 2100;
+            static float s_ViewAt = -1f;
+            static bool s_TapRelease;
+            static GameObject s_Root;
+
+            public static void Reset()
+            {
+                Close();
+                s_ViewAt = -1f;
+                s_TapRelease = false;
+                Hold(Inventory, false);
+            }
+
+            public static void Rebuild()
+            {
+                if (s_Root == null) return;
+                Close();
+                Open();
+            }
+
+            public static void Tick(int b, int down, int up)
+            {
+                if (s_TapRelease)
+                {
+                    Hold(Inventory, false);
+                    s_TapRelease = false;
+                }
+                float now = Time.realtimeSinceStartup;
+                if ((down & PadView) != 0) s_ViewAt = now;
+                if ((b & PadView) != 0 && s_ViewAt >= 0f && s_Root == null && now - s_ViewAt >= HoldTime)
+                {
+                    Open();
+                    // A HUD that does not show cancels the hold: no tap.
+                    if (s_Root == null) s_ViewAt = -1f;
+                }
+                if ((up & PadView) != 0)
+                {
+                    if (s_Root != null)
+                        Close();
+                    else if (s_ViewAt >= 0f)
+                    {
+                        Hold(Inventory, true);
+                        s_TapRelease = true;
+                    }
+                    s_ViewAt = -1f;
+                }
+            }
+
+            static void Close()
+            {
+                if (s_Root != null) UnityEngine.Object.Destroy(s_Root);
+                s_Root = null;
+            }
+
+            sealed class Line
+            {
+                public readonly int Glyph;
+                public readonly string Text;
+                public Line(int glyph, string text)
+                {
+                    Glyph = glyph;
+                    Text = text;
+                }
+            }
+
+            static string Name(MappedControl c)
+            {
+                string n = MappedInput.GetControlName(c);
+                return string.IsNullOrEmpty(n) ? c.ToString() : n;
+            }
+
+            static void Open()
+            {
+                Camera cam;
+                Transform root = Ui.HudRoot(out cam);
+                if (root == null) return;
+                UIFont font = Ui.Font(root);
+                Shader shader = Ui.TextureShader();
+                List<Line> left = new List<Line>();
+                List<Line> right = new List<Line>();
+                left.Add(new Line(GlyphLeftStick, "Move the cursor"));
+                left.Add(new Line(GlyphA, "Click"));
+                left.Add(new Line(GlyphB, "Right-click"));
+                left.Add(new Line(GlyphLT, "Ability menu"));
+                left.Add(new Line(GlyphRightStick, "Pan the camera"));
+                left.Add(new Line(GlyphDpad, "Zoom (up, down)"));
+                left.Add(new Line(GlyphDpad, "In windows: go to the next control"));
+                left.Add(new Line(GlyphRightStick, "In windows: scroll"));
+                left.Add(new Line(GlyphView, "Hold: this help"));
+                for (int i = 0; i < ButtonBits.Length; i++) right.Add(new Line(ButtonGlyphs[i], Name(ButtonCommands[i].Control)));
+                right.Add(new Line(GlyphView, Name(Inventory.Control)));
+                // Rows for which the controller has no glyph are left out.
+                left.RemoveAll(NoGlyph);
+                right.RemoveAll(NoGlyph);
+
+                float f = font.size, g = f * 1.25f, rowH = f * 1.7f, colW = f * 19f, pad = f * 1.3f, titleH = f * 2f;
+                int rows = Mathf.Max(left.Count, right.Count);
+                float w = 2f * pad + 2f * colW, h = 2f * pad + titleH + rows * rowH;
+                s_Root = NGUITools.AddChild(root.gameObject);
+                s_Root.name = "PortController.Help";
+                s_Root.AddComponent(typeof(UIPanel));
+                Vector3 center = root.InverseTransformPoint(cam.ViewportToWorldPoint(new Vector3(0.5f, 0.5f, 0f)));
+                s_Root.transform.localPosition = new Vector3(center.x, center.y, -12f);
+                int tw = Mathf.Clamp(Mathf.RoundToInt(w), 64, 2048), th = Mathf.Clamp(Mathf.RoundToInt(h), 64, 2048);
+                UITexture back = Ui.AddTexture(s_Root, Ui.Panel(tw, th, Mathf.RoundToInt(f * 0.9f)), shader, 1f, Depth);
+                back.transform.localScale = new Vector3(w, h, 1f);
+                UILabel title = Ui.AddLabel(s_Root, font, "Controller", UIWidget.Pivot.Center, Depth + 2);
+                title.color = new Color(0.94f, 0.82f, 0.52f, 1f);
+                title.transform.localPosition = new Vector3(0f, h * 0.5f - pad - titleH * 0.5f, 0f);
+                float top = h * 0.5f - pad - titleH - rowH * 0.5f, x0 = -w * 0.5f + pad;
+                for (int i = 0; i < left.Count; i++)
+                    Ui.Row(s_Root, font, shader, x0, top - i * rowH, g, left[i].Glyph, left[i].Text, Depth + 2);
+                for (int i = 0; i < right.Count; i++)
+                    Ui.Row(s_Root, font, shader, x0 + colW, top - i * rowH, g, right[i].Glyph, right[i].Text, Depth + 2);
+            }
+
+            static bool NoGlyph(Line l)
+            {
+                return Glyphs.Get(l.Glyph) == null;
             }
         }
     }

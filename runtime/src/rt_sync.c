@@ -153,10 +153,6 @@ void rt_DeleteCriticalSection(_cpu *cpu)
         }
         if (r != EBUSY) rt_fatal("DeleteCriticalSection failed (%d)", r);
         if (pthread_mutex_unlock(&cs_table_lock) != 0) rt_fatal("critical section table unlock failed");
-        rt_log("DeleteCriticalSection of the critical section at 0x%08x while it is in use (owner thread %u, "
-               "recursion %u, calling thread %u, return address 0x%08x); the host mutex is destroyed after the "
-               "last LeaveCriticalSection",
-               cs, rd32(cs + 12), rd32(cs + 8), rt_self()->tid, rd32(esp));
         return;
     }
     if (r != 0) rt_fatal("DeleteCriticalSection failed (%d)", r);
