@@ -1,0 +1,2 @@
+loc_101177C5,mono_entry
+loc_10000000,mono_image

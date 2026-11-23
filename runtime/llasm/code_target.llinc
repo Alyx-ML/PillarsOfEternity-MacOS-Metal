@@ -1,0 +1,6 @@
+;; Address-preserving translation (SRW --preserve_addresses): every return,
+;; indirect call and indirect jump calls rt_code_target with the original
+;; x86 target address and tail-calls the translated procedure that it
+;; returns (runtime/src/rt_code.c). The runtime llasm files use it for the
+;; same transfers.
+func rt_code_target address

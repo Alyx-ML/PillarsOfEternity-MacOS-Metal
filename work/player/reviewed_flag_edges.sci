@@ -1,0 +1,8 @@
+loc_264A1F88, loc_264A1F76 ; ZF returned by the C runtime helper at loc_264AF328 (rets marked in instruction_flags.sci)
+loc_264A20E8, loc_264A20D6 ; ZF returned by the C runtime helper at loc_264AF328 (rets marked in instruction_flags.sci)
+loc_264A219D, loc_264A218B ; ZF returned by the C runtime helper at loc_264AF328 (rets marked in instruction_flags.sci)
+loc_264A22D8, loc_264A22C6 ; ZF returned by the C runtime helper at loc_264AF328 (rets marked in instruction_flags.sci)
+loc_264A2408, loc_264A23F6 ; ZF returned by the C runtime helper at loc_264AF328 (rets marked in instruction_flags.sci)
+loc_264A2BC8, loc_264A2BB6 ; ZF returned by the C runtime helper at loc_264AF328 (rets marked in instruction_flags.sci)
+loc_264A34D8, loc_264A34C6 ; ZF returned by the C runtime helper at loc_264AF328 (rets marked in instruction_flags.sci)
+loc_264A4EA8, loc_264A4E96 ; ZF returned by the C runtime helper at loc_264AF328 (rets marked in instruction_flags.sci)

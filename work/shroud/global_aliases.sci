@@ -1,0 +1,2 @@
+loc_11073975,shroud_entry
+loc_11000000,shroud_image

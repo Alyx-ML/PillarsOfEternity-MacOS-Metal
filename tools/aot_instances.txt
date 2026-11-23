@@ -1,0 +1,209 @@
+# Generic instances for PortAotInstances.dll (tools/gen_aot_instances.cs).
+# The Mono full-AOT compiler did not compile these instances from the
+# game's assemblies. Each entry names the run that showed the
+# ExecutionEngineException ("Attempting to JIT compile method ... while
+# running with --aot-only") in output_log.txt.
+
+# EqualityComparer<Guid>..cctor makes the comparer with
+# Activator.CreateInstance (InstanceID..cctor, 2026-11-14).
+type mscorlib:System.Collections.Generic.GenericEqualityComparer`1 mscorlib:System.Guid
+
+# A generic virtual method: Enumerable.ThenByDescending<Resolution, int>
+# calls IOrderedEnumerable<Resolution>.CreateOrderedEnumerable<int>
+# (ResolutionController.Sort, 2026-11-14).
+method System.Core:System.Linq.OrderedEnumerable`1 UnityEngine:UnityEngine.Resolution CreateOrderedEnumerable mscorlib:System.Int32
+
+# The array helper wrapper Resolution[]:ICollection`1.CopyTo: the AOT
+# compiler adds the helpers of T[] when it compiles a TypeSpec of
+# ICollection`1<T> for a value type T. Enumerable.ToArray<Resolution> calls
+# CopyTo through ICollection<Resolution> (ResolutionController.Sort,
+# 2026-11-14).
+type mscorlib:System.Collections.Generic.ICollection`1 UnityEngine:UnityEngine.Resolution
+
+# Enumerable.Max and Enumerable.Min with a selector of a value type call
+# the private method Enumerable.Iterate<TSource, TResult>. A TResult of a
+# value type has no shared code. UITweenerAggregator.Init stopped at
+# Iterate<UITweener, single> (Enumerable.Max<UITweener>, 2026-11-15). The
+# other entries are the other Max and Min calls with a value-type selector
+# in the game's assemblies (Max<StatusEffect> with single,
+# Max<UIDataManagerHelper/CharacterStats> and
+# Min<UIDataManagerHelper/CharacterStats> with int). The CharacterStats of
+# these calls is the type nested in UIDataManagerHelper, not the top-level
+# CharacterStats: UIDataManagerHelper.GetRelativeMaxStamina stopped at
+# Iterate<UIDataManagerHelper/CharacterStats, int> in character creation
+# (2026-11-15).
+method System.Core:System.Linq.Enumerable Iterate Assembly-CSharp:UITweener mscorlib:System.Single
+method System.Core:System.Linq.Enumerable Iterate Assembly-CSharp:StatusEffect mscorlib:System.Single
+method System.Core:System.Linq.Enumerable Iterate Assembly-CSharp:UIDataManagerHelper/CharacterStats mscorlib:System.Int32
+
+# The reflection getters of PropertyInfo.GetValue (gen_aot_instances.cs,
+# "getters"). XmlSerializer reads the properties of the OEIFormats data
+# classes with PropertyInfo.GetValue; all XmlSerializer roots of the game
+# are OEIFormats types (FlowChartData.Load and the other Load and Save
+# methods). FlowChartData.Load stopped at Getter`2<FlowChartData,
+# List`1<FlowChartNode>> (2026-11-14).
+getters OEIFormats
+# All properties of Assembly-CSharp. The save game code
+# (Persistence.SaveObject, PersistenceManager.SaveComponentForObject,
+# ObjectPersistencePacket) reads the properties with the [Persistent]
+# attribute with PropertyInfo.GetValue. ComponentUtils.CopyComponent and
+# ComponentUtils.CopyScriptableObject read every instance property (with
+# BindingFlags.DeclaredOnly, up to MonoBehaviour) of the copied type.
+# QuestManager.Start stopped at Getter`2<Quest, QuestData>; because the
+# copy then did not clear ComponentUtils.s_fieldInfo, each later
+# CopyComponent read the fields of Quest (2026-11-14).
+getters Assembly-CSharp
+
+# Interlocked.Exchange<T> is an internal call. In AOT-only mode, Mono needs
+# the managed-to-native wrapper of each instance in an AOT image. The AOT
+# compiler adds the wrapper of an instance that compiled code calls; it did
+# not add the wrapper of the instance that the game calls (with a reference
+# type T). Console.FetchDialogueMessages (from UIConversationManager.Update)
+# stopped at the wrapper of Exchange<List`1<Console/ConsoleMessage>> in the
+# first level (2026-11-15).
+method mscorlib:System.Threading.Interlocked Exchange mscorlib:System.Collections.Generic.List`1<Assembly-CSharp:Console/ConsoleMessage>
+# The other call of Exchange<T> in the game's assemblies (MsgPack,
+# Exchange<string>). An entry makes the wrapper only with the AOT compiler
+# correction of runtime/src/rt_mono.c ("Native wrappers of generic internal
+# calls"). The game also calls CompareExchange<T> (MsgPack, OEIFormats,
+# SteamworksManaged). The JIT compiles CompareExchange<T> of a reference
+# type inline (no call and no wrapper in the AOT code of the entries
+# below), so these calls need no wrapper.
+method mscorlib:System.Threading.Interlocked Exchange mscorlib:System.String
+method mscorlib:System.Threading.Interlocked CompareExchange mscorlib:System.String
+method mscorlib:System.Threading.Interlocked CompareExchange System:System.ComponentModel.PropertyChangedEventHandler
+
+# Dictionary<TKey, TValue>.GetObjectData (BinaryFormatter, the save games of
+# Persistent.BinarySerialize) calls CopyTo(KeyValuePair<TKey, TValue>[],
+# int), which calls the private generic method
+# Do_CopyTo<KeyValuePair<TKey, TValue>, KeyValuePair<TKey, TValue>>. The
+# AOT compiler compiled CopyTo of each Dictionary instance of the game, but
+# not this method instance. KeyValuePair is a value type, so there is no
+# shared code. GameState.Autosave stopped at Do_CopyTo of
+# Dictionary<string, QuestManager/QuestTracker> (2026-11-15).
+# BinaryFormatter writes only [Serializable] types. The entries below are
+# the closed Dictionary`2 instances (also as type arguments) in the types of
+# the instance fields of [Serializable] types, and of the fields and
+# properties with the Persistent attribute, in Assembly-CSharp,
+# Assembly-CSharp-firstpass, OEIFormats and OEICommon.
+method mscorlib:System.Collections.Generic.Dictionary`2 Assembly-CSharp:AchievementTracker/TrackedAchievementStat mscorlib:System.Collections.Generic.List`1<mscorlib:System.String> Do_CopyTo mscorlib:System.Collections.Generic.KeyValuePair`2<Assembly-CSharp:AchievementTracker/TrackedAchievementStat,mscorlib:System.Collections.Generic.List`1<mscorlib:System.String>> mscorlib:System.Collections.Generic.KeyValuePair`2<Assembly-CSharp:AchievementTracker/TrackedAchievementStat,mscorlib:System.Collections.Generic.List`1<mscorlib:System.String>>
+method mscorlib:System.Collections.Generic.Dictionary`2 Assembly-CSharp:KeyControl mscorlib:System.Int32 Do_CopyTo mscorlib:System.Collections.Generic.KeyValuePair`2<Assembly-CSharp:KeyControl,mscorlib:System.Int32> mscorlib:System.Collections.Generic.KeyValuePair`2<Assembly-CSharp:KeyControl,mscorlib:System.Int32>
+method mscorlib:System.Collections.Generic.Dictionary`2 mscorlib:System.Int32 Assembly-CSharp:BMGlyph Do_CopyTo mscorlib:System.Collections.Generic.KeyValuePair`2<mscorlib:System.Int32,Assembly-CSharp:BMGlyph> mscorlib:System.Collections.Generic.KeyValuePair`2<mscorlib:System.Int32,Assembly-CSharp:BMGlyph>
+method mscorlib:System.Collections.Generic.Dictionary`2 mscorlib:System.Int32 mscorlib:System.Int32 Do_CopyTo mscorlib:System.Collections.Generic.KeyValuePair`2<mscorlib:System.Int32,mscorlib:System.Int32> mscorlib:System.Collections.Generic.KeyValuePair`2<mscorlib:System.Int32,mscorlib:System.Int32>
+method mscorlib:System.Collections.Generic.Dictionary`2 mscorlib:System.String Assembly-CSharp:MapDataTagSpecific Do_CopyTo mscorlib:System.Collections.Generic.KeyValuePair`2<mscorlib:System.String,Assembly-CSharp:MapDataTagSpecific> mscorlib:System.Collections.Generic.KeyValuePair`2<mscorlib:System.String,Assembly-CSharp:MapDataTagSpecific>
+method mscorlib:System.Collections.Generic.Dictionary`2 mscorlib:System.String Assembly-CSharp:QuestManager/QuestTimestamps Do_CopyTo mscorlib:System.Collections.Generic.KeyValuePair`2<mscorlib:System.String,Assembly-CSharp:QuestManager/QuestTimestamps> mscorlib:System.Collections.Generic.KeyValuePair`2<mscorlib:System.String,Assembly-CSharp:QuestManager/QuestTimestamps>
+method mscorlib:System.Collections.Generic.Dictionary`2 mscorlib:System.String Assembly-CSharp:QuestManager/QuestTracker Do_CopyTo mscorlib:System.Collections.Generic.KeyValuePair`2<mscorlib:System.String,Assembly-CSharp:QuestManager/QuestTracker> mscorlib:System.Collections.Generic.KeyValuePair`2<mscorlib:System.String,Assembly-CSharp:QuestManager/QuestTracker>
+method mscorlib:System.Collections.Generic.Dictionary`2 mscorlib:System.String OEIFormats:OEIFormats.ClassExtenderDescriptor/PropertyData Do_CopyTo mscorlib:System.Collections.Generic.KeyValuePair`2<mscorlib:System.String,OEIFormats:OEIFormats.ClassExtenderDescriptor/PropertyData> mscorlib:System.Collections.Generic.KeyValuePair`2<mscorlib:System.String,OEIFormats:OEIFormats.ClassExtenderDescriptor/PropertyData>
+method mscorlib:System.Collections.Generic.Dictionary`2 mscorlib:System.String mscorlib:System.Collections.BitArray Do_CopyTo mscorlib:System.Collections.Generic.KeyValuePair`2<mscorlib:System.String,mscorlib:System.Collections.BitArray> mscorlib:System.Collections.Generic.KeyValuePair`2<mscorlib:System.String,mscorlib:System.Collections.BitArray>
+method mscorlib:System.Collections.Generic.Dictionary`2 mscorlib:System.String mscorlib:System.Collections.Generic.Dictionary`2<mscorlib:System.Int32,mscorlib:System.Int32> Do_CopyTo mscorlib:System.Collections.Generic.KeyValuePair`2<mscorlib:System.String,mscorlib:System.Collections.Generic.Dictionary`2<mscorlib:System.Int32,mscorlib:System.Int32>> mscorlib:System.Collections.Generic.KeyValuePair`2<mscorlib:System.String,mscorlib:System.Collections.Generic.Dictionary`2<mscorlib:System.Int32,mscorlib:System.Int32>>
+method mscorlib:System.Collections.Generic.Dictionary`2 mscorlib:System.String mscorlib:System.Object Do_CopyTo mscorlib:System.Collections.Generic.KeyValuePair`2<mscorlib:System.String,mscorlib:System.Object> mscorlib:System.Collections.Generic.KeyValuePair`2<mscorlib:System.String,mscorlib:System.Object>
+method mscorlib:System.Collections.Generic.Dictionary`2 mscorlib:System.Type Assembly-CSharp:ComponentPersistencePacket Do_CopyTo mscorlib:System.Collections.Generic.KeyValuePair`2<mscorlib:System.Type,Assembly-CSharp:ComponentPersistencePacket> mscorlib:System.Collections.Generic.KeyValuePair`2<mscorlib:System.Type,Assembly-CSharp:ComponentPersistencePacket>
+# Do_CopyTo calls the delegate Dictionary`2/Transform`1<TKey, TValue,
+# KeyValuePair<TKey, TValue>> (make_pair). In AOT-only mode, Mono needs the
+# delegate-invoke wrapper of each instance in an AOT image; the AOT
+# compiler adds it for a delegate instance of the TypeSpec table. The
+# Autosave run stopped at the wrapper of the QuestTracker instance after
+# the Do_CopyTo entries (2026-11-15). The type arguments of the nested type
+# are the two type arguments of Dictionary`2 and the one of Transform`1.
+type mscorlib:System.Collections.Generic.Dictionary`2/Transform`1 Assembly-CSharp:AchievementTracker/TrackedAchievementStat mscorlib:System.Collections.Generic.List`1<mscorlib:System.String> mscorlib:System.Collections.Generic.KeyValuePair`2<Assembly-CSharp:AchievementTracker/TrackedAchievementStat,mscorlib:System.Collections.Generic.List`1<mscorlib:System.String>>
+type mscorlib:System.Collections.Generic.Dictionary`2/Transform`1 Assembly-CSharp:KeyControl mscorlib:System.Int32 mscorlib:System.Collections.Generic.KeyValuePair`2<Assembly-CSharp:KeyControl,mscorlib:System.Int32>
+type mscorlib:System.Collections.Generic.Dictionary`2/Transform`1 mscorlib:System.Int32 Assembly-CSharp:BMGlyph mscorlib:System.Collections.Generic.KeyValuePair`2<mscorlib:System.Int32,Assembly-CSharp:BMGlyph>
+type mscorlib:System.Collections.Generic.Dictionary`2/Transform`1 mscorlib:System.Int32 mscorlib:System.Int32 mscorlib:System.Collections.Generic.KeyValuePair`2<mscorlib:System.Int32,mscorlib:System.Int32>
+type mscorlib:System.Collections.Generic.Dictionary`2/Transform`1 mscorlib:System.String Assembly-CSharp:MapDataTagSpecific mscorlib:System.Collections.Generic.KeyValuePair`2<mscorlib:System.String,Assembly-CSharp:MapDataTagSpecific>
+type mscorlib:System.Collections.Generic.Dictionary`2/Transform`1 mscorlib:System.String Assembly-CSharp:QuestManager/QuestTimestamps mscorlib:System.Collections.Generic.KeyValuePair`2<mscorlib:System.String,Assembly-CSharp:QuestManager/QuestTimestamps>
+type mscorlib:System.Collections.Generic.Dictionary`2/Transform`1 mscorlib:System.String Assembly-CSharp:QuestManager/QuestTracker mscorlib:System.Collections.Generic.KeyValuePair`2<mscorlib:System.String,Assembly-CSharp:QuestManager/QuestTracker>
+type mscorlib:System.Collections.Generic.Dictionary`2/Transform`1 mscorlib:System.String OEIFormats:OEIFormats.ClassExtenderDescriptor/PropertyData mscorlib:System.Collections.Generic.KeyValuePair`2<mscorlib:System.String,OEIFormats:OEIFormats.ClassExtenderDescriptor/PropertyData>
+type mscorlib:System.Collections.Generic.Dictionary`2/Transform`1 mscorlib:System.String mscorlib:System.Collections.BitArray mscorlib:System.Collections.Generic.KeyValuePair`2<mscorlib:System.String,mscorlib:System.Collections.BitArray>
+type mscorlib:System.Collections.Generic.Dictionary`2/Transform`1 mscorlib:System.String mscorlib:System.Collections.Generic.Dictionary`2<mscorlib:System.Int32,mscorlib:System.Int32> mscorlib:System.Collections.Generic.KeyValuePair`2<mscorlib:System.String,mscorlib:System.Collections.Generic.Dictionary`2<mscorlib:System.Int32,mscorlib:System.Int32>>
+type mscorlib:System.Collections.Generic.Dictionary`2/Transform`1 mscorlib:System.String mscorlib:System.Object mscorlib:System.Collections.Generic.KeyValuePair`2<mscorlib:System.String,mscorlib:System.Object>
+type mscorlib:System.Collections.Generic.Dictionary`2/Transform`1 mscorlib:System.Type Assembly-CSharp:ComponentPersistencePacket mscorlib:System.Collections.Generic.KeyValuePair`2<mscorlib:System.Type,Assembly-CSharp:ComponentPersistencePacket>
+
+# SharpSerializer (Polenter.Serialization in Assembly-CSharp,
+# PersistenceManager.SaveLevelDataToFile and SaveMobileDataToFile) reads
+# each public instance property with a getter, a setter and no index
+# parameters (PropertyProvider.IgnoreProperty) with PropertyInfo.GetValue.
+# For a List`1 value that is List`1.Capacity, so Mono needs
+# GetterAdapterFrame<List`1<T>, int> and Getter`2<List`1<T>, int> for each
+# list type (int is a value type, so there is no shared code). The autosave
+# stopped at the List`1 instances of ItemMod, InventoryItem, Team, Guid and
+# Affliction (2026-11-15). The entries below are the List`1 instances that
+# SharpSerializer can reach from the members with the Persistent attribute
+# (the read-write public instance properties of the types of
+# Assembly-CSharp, Assembly-CSharp-firstpass, OEIFormats, OEICommon and
+# UnityEngine, the array element types and the type arguments).
+method mscorlib:System.Reflection.MonoProperty GetterAdapterFrame mscorlib:System.Collections.Generic.List`1<Assembly-CSharp:ActivationTimers/Timer> mscorlib:System.Int32
+type mscorlib:System.Reflection.MonoProperty/Getter`2 mscorlib:System.Collections.Generic.List`1<Assembly-CSharp:ActivationTimers/Timer> mscorlib:System.Int32
+method mscorlib:System.Reflection.MonoProperty GetterAdapterFrame mscorlib:System.Collections.Generic.List`1<Assembly-CSharp:Affliction> mscorlib:System.Int32
+type mscorlib:System.Reflection.MonoProperty/Getter`2 mscorlib:System.Collections.Generic.List`1<Assembly-CSharp:Affliction> mscorlib:System.Int32
+method mscorlib:System.Reflection.MonoProperty GetterAdapterFrame mscorlib:System.Collections.Generic.List`1<Assembly-CSharp:Equippable> mscorlib:System.Int32
+type mscorlib:System.Reflection.MonoProperty/Getter`2 mscorlib:System.Collections.Generic.List`1<Assembly-CSharp:Equippable> mscorlib:System.Int32
+method mscorlib:System.Reflection.MonoProperty GetterAdapterFrame mscorlib:System.Collections.Generic.List`1<Assembly-CSharp:ExperienceSerializerPacket> mscorlib:System.Int32
+type mscorlib:System.Reflection.MonoProperty/Getter`2 mscorlib:System.Collections.Generic.List`1<Assembly-CSharp:ExperienceSerializerPacket> mscorlib:System.Int32
+method mscorlib:System.Reflection.MonoProperty GetterAdapterFrame mscorlib:System.Collections.Generic.List`1<Assembly-CSharp:GenericAbility> mscorlib:System.Int32
+type mscorlib:System.Reflection.MonoProperty/Getter`2 mscorlib:System.Collections.Generic.List`1<Assembly-CSharp:GenericAbility> mscorlib:System.Int32
+method mscorlib:System.Reflection.MonoProperty GetterAdapterFrame mscorlib:System.Collections.Generic.List`1<Assembly-CSharp:GenericSpell> mscorlib:System.Int32
+type mscorlib:System.Reflection.MonoProperty/Getter`2 mscorlib:System.Collections.Generic.List`1<Assembly-CSharp:GenericSpell> mscorlib:System.Int32
+method mscorlib:System.Reflection.MonoProperty GetterAdapterFrame mscorlib:System.Collections.Generic.List`1<Assembly-CSharp:GenericTalent> mscorlib:System.Int32
+type mscorlib:System.Reflection.MonoProperty/Getter`2 mscorlib:System.Collections.Generic.List`1<Assembly-CSharp:GenericTalent> mscorlib:System.Int32
+method mscorlib:System.Reflection.MonoProperty GetterAdapterFrame mscorlib:System.Collections.Generic.List`1<Assembly-CSharp:Health> mscorlib:System.Int32
+type mscorlib:System.Reflection.MonoProperty/Getter`2 mscorlib:System.Collections.Generic.List`1<Assembly-CSharp:Health> mscorlib:System.Int32
+method mscorlib:System.Reflection.MonoProperty GetterAdapterFrame mscorlib:System.Collections.Generic.List`1<Assembly-CSharp:InventoryItem> mscorlib:System.Int32
+type mscorlib:System.Reflection.MonoProperty/Getter`2 mscorlib:System.Collections.Generic.List`1<Assembly-CSharp:InventoryItem> mscorlib:System.Int32
+method mscorlib:System.Reflection.MonoProperty GetterAdapterFrame mscorlib:System.Collections.Generic.List`1<Assembly-CSharp:Item> mscorlib:System.Int32
+type mscorlib:System.Reflection.MonoProperty/Getter`2 mscorlib:System.Collections.Generic.List`1<Assembly-CSharp:Item> mscorlib:System.Int32
+method mscorlib:System.Reflection.MonoProperty GetterAdapterFrame mscorlib:System.Collections.Generic.List`1<Assembly-CSharp:ItemMod> mscorlib:System.Int32
+type mscorlib:System.Reflection.MonoProperty/Getter`2 mscorlib:System.Collections.Generic.List`1<Assembly-CSharp:ItemMod> mscorlib:System.Int32
+method mscorlib:System.Reflection.MonoProperty GetterAdapterFrame mscorlib:System.Collections.Generic.List`1<Assembly-CSharp:NotesPage/NoteEntry> mscorlib:System.Int32
+type mscorlib:System.Reflection.MonoProperty/Getter`2 mscorlib:System.Collections.Generic.List`1<Assembly-CSharp:NotesPage/NoteEntry> mscorlib:System.Int32
+method mscorlib:System.Reflection.MonoProperty GetterAdapterFrame mscorlib:System.Collections.Generic.List`1<Assembly-CSharp:NotesPage> mscorlib:System.Int32
+type mscorlib:System.Reflection.MonoProperty/Getter`2 mscorlib:System.Collections.Generic.List`1<Assembly-CSharp:NotesPage> mscorlib:System.Int32
+method mscorlib:System.Reflection.MonoProperty GetterAdapterFrame mscorlib:System.Collections.Generic.List`1<Assembly-CSharp:Phrase> mscorlib:System.Int32
+type mscorlib:System.Reflection.MonoProperty/Getter`2 mscorlib:System.Collections.Generic.List`1<Assembly-CSharp:Phrase> mscorlib:System.Int32
+method mscorlib:System.Reflection.MonoProperty GetterAdapterFrame mscorlib:System.Collections.Generic.List`1<Assembly-CSharp:PrerequisiteData> mscorlib:System.Int32
+type mscorlib:System.Reflection.MonoProperty/Getter`2 mscorlib:System.Collections.Generic.List`1<Assembly-CSharp:PrerequisiteData> mscorlib:System.Int32
+method mscorlib:System.Reflection.MonoProperty GetterAdapterFrame mscorlib:System.Collections.Generic.List`1<Assembly-CSharp:QuestSerializerPacket> mscorlib:System.Int32
+type mscorlib:System.Reflection.MonoProperty/Getter`2 mscorlib:System.Collections.Generic.List`1<Assembly-CSharp:QuestSerializerPacket> mscorlib:System.Int32
+method mscorlib:System.Reflection.MonoProperty GetterAdapterFrame mscorlib:System.Collections.Generic.List`1<Assembly-CSharp:StatusEffect> mscorlib:System.Int32
+type mscorlib:System.Reflection.MonoProperty/Getter`2 mscorlib:System.Collections.Generic.List`1<Assembly-CSharp:StatusEffect> mscorlib:System.Int32
+method mscorlib:System.Reflection.MonoProperty GetterAdapterFrame mscorlib:System.Collections.Generic.List`1<Assembly-CSharp:Stealth/DetectionObject> mscorlib:System.Int32
+type mscorlib:System.Reflection.MonoProperty/Getter`2 mscorlib:System.Collections.Generic.List`1<Assembly-CSharp:Stealth/DetectionObject> mscorlib:System.Int32
+method mscorlib:System.Reflection.MonoProperty GetterAdapterFrame mscorlib:System.Collections.Generic.List`1<Assembly-CSharp:StrongholdAdventure> mscorlib:System.Int32
+type mscorlib:System.Reflection.MonoProperty/Getter`2 mscorlib:System.Collections.Generic.List`1<Assembly-CSharp:StrongholdAdventure> mscorlib:System.Int32
+method mscorlib:System.Reflection.MonoProperty GetterAdapterFrame mscorlib:System.Collections.Generic.List`1<Assembly-CSharp:StrongholdAdventureCompletion> mscorlib:System.Int32
+type mscorlib:System.Reflection.MonoProperty/Getter`2 mscorlib:System.Collections.Generic.List`1<Assembly-CSharp:StrongholdAdventureCompletion> mscorlib:System.Int32
+method mscorlib:System.Reflection.MonoProperty GetterAdapterFrame mscorlib:System.Collections.Generic.List`1<Assembly-CSharp:StrongholdEvent> mscorlib:System.Int32
+type mscorlib:System.Reflection.MonoProperty/Getter`2 mscorlib:System.Collections.Generic.List`1<Assembly-CSharp:StrongholdEvent> mscorlib:System.Int32
+method mscorlib:System.Reflection.MonoProperty GetterAdapterFrame mscorlib:System.Collections.Generic.List`1<Assembly-CSharp:StrongholdHireling> mscorlib:System.Int32
+type mscorlib:System.Reflection.MonoProperty/Getter`2 mscorlib:System.Collections.Generic.List`1<Assembly-CSharp:StrongholdHireling> mscorlib:System.Int32
+method mscorlib:System.Reflection.MonoProperty GetterAdapterFrame mscorlib:System.Collections.Generic.List`1<Assembly-CSharp:StrongholdPrisonerData> mscorlib:System.Int32
+type mscorlib:System.Reflection.MonoProperty/Getter`2 mscorlib:System.Collections.Generic.List`1<Assembly-CSharp:StrongholdPrisonerData> mscorlib:System.Int32
+method mscorlib:System.Reflection.MonoProperty GetterAdapterFrame mscorlib:System.Collections.Generic.List`1<Assembly-CSharp:StrongholdUpgrade/Type> mscorlib:System.Int32
+type mscorlib:System.Reflection.MonoProperty/Getter`2 mscorlib:System.Collections.Generic.List`1<Assembly-CSharp:StrongholdUpgrade/Type> mscorlib:System.Int32
+method mscorlib:System.Reflection.MonoProperty GetterAdapterFrame mscorlib:System.Collections.Generic.List`1<Assembly-CSharp:StrongholdVisitorArrival> mscorlib:System.Int32
+type mscorlib:System.Reflection.MonoProperty/Getter`2 mscorlib:System.Collections.Generic.List`1<Assembly-CSharp:StrongholdVisitorArrival> mscorlib:System.Int32
+method mscorlib:System.Reflection.MonoProperty GetterAdapterFrame mscorlib:System.Collections.Generic.List`1<Assembly-CSharp:StrongholdVisitorSerializeData> mscorlib:System.Int32
+type mscorlib:System.Reflection.MonoProperty/Getter`2 mscorlib:System.Collections.Generic.List`1<Assembly-CSharp:StrongholdVisitorSerializeData> mscorlib:System.Int32
+method mscorlib:System.Reflection.MonoProperty GetterAdapterFrame mscorlib:System.Collections.Generic.List`1<Assembly-CSharp:Team> mscorlib:System.Int32
+type mscorlib:System.Reflection.MonoProperty/Getter`2 mscorlib:System.Collections.Generic.List`1<Assembly-CSharp:Team> mscorlib:System.Int32
+method mscorlib:System.Reflection.MonoProperty GetterAdapterFrame mscorlib:System.Collections.Generic.List`1<Assembly-CSharp:Trap> mscorlib:System.Int32
+type mscorlib:System.Reflection.MonoProperty/Getter`2 mscorlib:System.Collections.Generic.List`1<Assembly-CSharp:Trap> mscorlib:System.Int32
+method mscorlib:System.Reflection.MonoProperty GetterAdapterFrame mscorlib:System.Collections.Generic.List`1<mscorlib:System.Guid> mscorlib:System.Int32
+type mscorlib:System.Reflection.MonoProperty/Getter`2 mscorlib:System.Collections.Generic.List`1<mscorlib:System.Guid> mscorlib:System.Int32
+method mscorlib:System.Reflection.MonoProperty GetterAdapterFrame mscorlib:System.Collections.Generic.List`1<mscorlib:System.Int32[]> mscorlib:System.Int32
+type mscorlib:System.Reflection.MonoProperty/Getter`2 mscorlib:System.Collections.Generic.List`1<mscorlib:System.Int32[]> mscorlib:System.Int32
+method mscorlib:System.Reflection.MonoProperty GetterAdapterFrame mscorlib:System.Collections.Generic.List`1<mscorlib:System.String> mscorlib:System.Int32
+type mscorlib:System.Reflection.MonoProperty/Getter`2 mscorlib:System.Collections.Generic.List`1<mscorlib:System.String> mscorlib:System.Int32
+# SortedList`2.Capacity is the other read-write property of a generic
+# collection that SharpSerializer reaches. The mobile-object save of
+# InGameGlobal stopped at this getter (2026-11-15).
+method mscorlib:System.Reflection.MonoProperty GetterAdapterFrame System:System.Collections.Generic.SortedList`2<mscorlib:System.Int32,Assembly-CSharp:StrongholdAdventure> mscorlib:System.Int32
+type mscorlib:System.Reflection.MonoProperty/Getter`2 System:System.Collections.Generic.SortedList`2<mscorlib:System.Int32,Assembly-CSharp:StrongholdAdventure> mscorlib:System.Int32
+
+# All properties of UnityEngine. SharpSerializer reads the read-write
+# properties of the run-time type of each UnityEngine object in the level
+# data (for example UnityEngine.Object.name). The getter delegate of each
+# instance needs its delegate-invoke wrapper, also when both type arguments
+# are reference types. The autosave stopped at the wrapper of
+# Getter`2<UnityEngine.Object, string> for companion_Heodan and the
+# caravan NPCs (2026-11-15).
+getters UnityEngine

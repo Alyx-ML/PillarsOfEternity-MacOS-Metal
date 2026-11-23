@@ -1,0 +1,2 @@
+loc_264A5E23,player_entry
+loc_26000000,player_image

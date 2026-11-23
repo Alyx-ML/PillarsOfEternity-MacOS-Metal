@@ -1,0 +1,51 @@
+;; Port-specific llasm macros for Pillars of Eternity.
+;; SRW Windows output uses only the macros in SR/llasm-support.
+;; instruction_replacements.sci entries that call runtime hooks declare
+;; the hook functions here.
+
+;; Target of instruction_replacements.sci entries that replace a jump table
+;; with compare-and-select code. The replacement jumps here when the table
+;; index has a value that the original table does not cover. The runtime
+;; defines the procedure once (runtime/llasm/calls.llasm), because the
+;; executable links more than one translated module.
+proc sr_invalid_jump_table_index external
+
+;; Target of the instruction_replacements.sci entry that replaces the call of
+;; mono_custom_attrs_get_attr in cominterop_get_com_slot_begin of mono.dll
+;; (runtime/src/rt_mono.c). The runtime defines the procedure
+;; (runtime/llasm/calls.llasm).
+proc rt_mono_interface_type_attr_asm2c external
+
+;; Target of the instruction_replacements.sci entry that replaces the call of
+;; mono_mb_emit_native_call for GetLastError in
+;; mono_marshal_get_native_wrapper of mono.dll (runtime/src/rt_mono.c). The
+;; runtime defines the procedure (runtime/llasm/calls.llasm).
+proc rt_mono_emit_get_last_error_asm2c external
+
+;; Target of the instruction_replacements.sci entry that replaces the store
+;; of cfg->disable_aot of CEE_MONO_LDPTR in mono.dll (runtime/src/rt_mono.c).
+;; The runtime defines the procedure (runtime/llasm/calls.llasm).
+proc rt_mono_ldptr_disable_aot_asm2c external
+
+;; Replacement of the first instruction of mono_method_can_access_method in
+;; mono.dll (runtime/src/rt_mono.c). The runtime defines the procedure
+;; (runtime/llasm/calls.llasm).
+proc rt_mono_can_access_method_asm2c external
+
+;; Replacement of the generic sharing check for internal calls in the AOT
+;; compiler of mono.dll (runtime/src/rt_mono.c). The runtime defines the
+;; procedure (runtime/llasm/calls.llasm).
+proc rt_mono_aot_icall_wrapper_asm2c external
+
+;; Replacements of the jumps of the statically linked C runtime of
+;; PillarsOfEternity.exe to an outer function: _except_handler3,
+;; _EH4_TransferToHandler, _JumpToContinuation and longjmp
+;; (runtime/src/rt_seh.c). The runtime defines the procedures
+;; (runtime/llasm/calls.llasm).
+proc rt_seh_eh3_transfer_asm2c external
+proc rt_seh_eh4_transfer_asm2c external
+proc rt_seh_cxx_continuation_asm2c external
+proc rt_seh_longjmp_transfer_asm2c external
+
+;; rt_code_target for the address-preserving SRW output.
+include code_target.llinc

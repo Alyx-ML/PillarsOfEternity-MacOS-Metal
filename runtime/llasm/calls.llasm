@@ -1,0 +1,212 @@
+;; Calls from the runtime (C) into guest code.
+;;
+;; llasm makes a C function c_rt_call_c2asm(_cpu *cpu) for this procedure.
+;; That function pushes a return address and calls the procedure. The guest
+;; function returns to that address, and then c_rt_call_c2asm returns to C.
+;;
+;; Stack on entry:
+;;   [esp]      return address (pushed by c_rt_call_c2asm)
+;;   [esp + 4]  guest address of the function to call (pushed by rt_call)
+;;   [esp + 8]  first argument of the function
+;;
+;; The procedure removes the function address, so the function sees the
+;; return address followed by its arguments.
+;;
+;; Guest code addresses are original x86 addresses (address-preserving
+;; translation): rt_code_target gives the translated procedure.
+
+include llasm.llinc
+include code_target.llinc
+
+proc rt_call_c2asm global c_rt_call_c2asm
+        load tmp1, esp, 4
+        add tmp2, esp, 4
+        load tmp0, tmp2, 4
+        store tmp1, tmp2, 4
+        add esp, esp, 4
+        call rt_code_target tmp0
+        tcall tmp0
+endp
+
+;; Continuation of guest code after rt_transfer (rt_core.c).
+;;
+;; llasm makes a C function c_rt_transfer_c2asm(_cpu *cpu) for this
+;; procedure. That function pushes a return address and calls the procedure.
+;;
+;; Stack on entry:
+;;   [esp]      return address (pushed by c_rt_transfer_c2asm)
+;;   [esp + 4]  guest address to continue at (pushed by rt_transfer)
+;;
+;; The procedure removes both words. The guest code at the address then
+;; has the esp that the caller of rt_transfer set, as after a jmp
+;; instruction. The return address of the call level stays on the guest
+;; stack at the level start (rt_call_c2asm), so a return of the level
+;; function returns to C.
+proc rt_transfer_c2asm global c_rt_transfer_c2asm
+        add tmp1, esp, 4
+        load tmp0, tmp1, 4
+        add esp, esp, 8
+        call rt_code_target tmp0
+        tcall tmp0
+endp
+
+;; Return target for a fiber start procedure. A fiber procedure that returns
+;; ends the thread (Windows behavior). rt_fiber_returned does not return.
+funcv rt_fiber_returned $
+proc rt_fiber_exit_asm2c public
+        call rt_fiber_returned $
+        tcall eax
+endp
+
+;; Exception handler of the frame that the runtime registers around each
+;; call of an exception handler (rt_seh.c). It is a __cdecl function with
+;; four arguments: the caller removes them.
+funcv rt_seh_nested_handler $
+proc rt_seh_nested_asm2c public
+        call rt_seh_nested_handler $
+        load tmp0, esp, 4
+        add esp, esp, 4
+        call rt_code_target tmp0
+        tcall tmp0
+endp
+;; Copy of the cpuid_impl code of mono.dll (rt_mono.c). The copy is a
+;; __cdecl function with five arguments: the caller removes them.
+funcv rt_mono_cpuid $
+proc rt_mono_cpuid_asm2c public
+        call rt_mono_cpuid $
+        load tmp0, esp, 4
+        add esp, esp, 4
+        call rt_code_target tmp0
+        tcall tmp0
+endp
+
+;; Stack overflow helper of mono.dll (rt_mono.c). rt_mono_stack_overflow
+;; stops the process; the tail call is never reached.
+funcv rt_mono_stack_overflow $
+proc rt_mono_stack_overflow_asm2c public
+        call rt_mono_stack_overflow $
+        tcall rt_mono_stack_overflow_asm2c
+endp
+
+;; Replacements of the jumps of the statically linked C runtime of the
+;; program to an outer function (rt_seh.c): "call eax" in _except_handler3,
+;; "jmp esi" in _EH4_TransferToHandler, "jmp eax" in _JumpToContinuation
+;; and "jmp dword [edx+0x14]" in longjmp. The C functions continue the
+;; guest code with rt_transfer and do not return; the tail calls are never
+;; reached.
+funcv rt_seh_eh3_transfer $
+proc rt_seh_eh3_transfer_asm2c public
+        call rt_seh_eh3_transfer $
+        tcall rt_seh_eh3_transfer_asm2c
+endp
+
+funcv rt_seh_eh4_transfer $
+proc rt_seh_eh4_transfer_asm2c public
+        call rt_seh_eh4_transfer $
+        tcall rt_seh_eh4_transfer_asm2c
+endp
+
+funcv rt_seh_cxx_continuation $
+proc rt_seh_cxx_continuation_asm2c public
+        call rt_seh_cxx_continuation $
+        tcall rt_seh_cxx_continuation_asm2c
+endp
+
+funcv rt_seh_longjmp_transfer $
+proc rt_seh_longjmp_transfer_asm2c public
+        call rt_seh_longjmp_transfer $
+        tcall rt_seh_longjmp_transfer_asm2c
+endp
+
+;; Replacement of the call of mono_custom_attrs_get_attr in
+;; cominterop_get_com_slot_begin of mono.dll (rt_mono.c). It is a __cdecl
+;; function with two arguments: the caller removes them.
+funcv rt_mono_interface_type_attr $
+proc rt_mono_interface_type_attr_asm2c public
+        call rt_mono_interface_type_attr $
+        load tmp0, esp, 4
+        add esp, esp, 4
+        call rt_code_target tmp0
+        tcall tmp0
+endp
+
+;; Replacement of the call of mono_mb_emit_native_call for GetLastError in
+;; mono_marshal_get_native_wrapper of mono.dll (rt_mono.c). It is a __cdecl
+;; call: the caller removes the arguments.
+funcv rt_mono_emit_get_last_error $
+proc rt_mono_emit_get_last_error_asm2c public
+        call rt_mono_emit_get_last_error $
+        load tmp0, esp, 4
+        add esp, esp, 4
+        call rt_code_target tmp0
+        tcall tmp0
+endp
+
+;; Replacement of the first instruction (push ebp) of
+;; mono_method_can_access_method in mono.dll (rt_mono.c). The C function
+;; sets esp so that [esp] is the next address: the caller of
+;; mono_method_can_access_method, or the next instruction after it pushed
+;; ebp.
+funcv rt_mono_can_access_method $
+proc rt_mono_can_access_method_asm2c public
+        call rt_mono_can_access_method $
+        load tmp0, esp, 4
+        add esp, esp, 4
+        call rt_code_target tmp0
+        tcall tmp0
+endp
+
+;; Replacement of the store of cfg->disable_aot of CEE_MONO_LDPTR in
+;; mono.dll (rt_mono.c). The replacement pushes the address of the next
+;; instruction, so this returns there.
+funcv rt_mono_ldptr_disable_aot $
+proc rt_mono_ldptr_disable_aot_asm2c public
+        call rt_mono_ldptr_disable_aot $
+        load tmp0, esp, 4
+        add esp, esp, 4
+        call rt_code_target tmp0
+        tcall tmp0
+endp
+
+;; Replacement of "push dword [edi+8]" in the MONO_PATCH_INFO_METHOD case of
+;; compile_method of the AOT compiler in mono.dll (rt_mono.c). The C function
+;; sets esp so that [esp] is the next address: the check for type variables,
+;; or the next instruction after it pushed the argument.
+funcv rt_mono_aot_icall_wrapper $
+proc rt_mono_aot_icall_wrapper_asm2c public
+        call rt_mono_aot_icall_wrapper $
+        load tmp0, esp, 4
+        add esp, esp, 4
+        call rt_code_target tmp0
+        tcall tmp0
+endp
+
+;; Wrappers of mono_jit_init_version and mono_jit_init (rt_mono.c), which
+;; GetProcAddress gives in place of the exports of mono.dll. They are
+;; __cdecl functions: the caller removes the arguments.
+funcv rt_mono_jit_init_version $
+proc rt_mono_jit_init_version_asm2c public
+        call rt_mono_jit_init_version $
+        load tmp0, esp, 4
+        add esp, esp, 4
+        call rt_code_target tmp0
+        tcall tmp0
+endp
+
+funcv rt_mono_jit_init $
+proc rt_mono_jit_init_asm2c public
+        call rt_mono_jit_init $
+        load tmp0, esp, 4
+        add esp, esp, 4
+        call rt_code_target tmp0
+        tcall tmp0
+endp
+
+;; Target of instruction_replacements.sci entries that replace a jump table
+;; (runtime/llasm/macros.llinc). The jump comes when the table index has a
+;; value that the original table does not cover. INT 3 stops the program
+;; through the runtime interrupt handler; the tail call is never reached.
+proc sr_invalid_jump_table_index public
+INT 3
+tcall sr_invalid_jump_table_index
+endp
